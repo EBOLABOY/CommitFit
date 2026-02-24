@@ -1,0 +1,303 @@
+// ============ AI Roles ============
+
+export type AIRole = 'doctor' | 'rehab' | 'nutritionist' | 'trainer';
+
+export const AI_ROLE_NAMES: Record<AIRole, string> = {
+  doctor: '运动医生',
+  rehab: '康复师',
+  nutritionist: '营养师',
+  trainer: '私人教练',
+};
+
+// ============ Auth ============
+
+export interface RegisterRequest {
+  email: string;
+  password: string;
+  nickname?: string;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: {
+    id: string;
+    email: string;
+    nickname: string | null;
+  };
+}
+
+// ============ User Profile ============
+
+export type Gender = 'male' | 'female';
+export type ExperienceLevel = 'beginner' | 'intermediate' | 'advanced';
+
+export interface UserProfile {
+  user_id: string;
+  height: number | null;
+  weight: number | null;
+  age: number | null;
+  gender: Gender | null;
+  training_goal: string | null;
+  experience_level: ExperienceLevel | null;
+  updated_at: string;
+}
+
+export interface UpdateProfileRequest {
+  height?: number;
+  weight?: number;
+  age?: number;
+  gender?: Gender;
+  training_goal?: string;
+  experience_level?: ExperienceLevel;
+}
+
+// ============ Health Metrics ============
+
+export type MetricType =
+  | 'testosterone'
+  | 'blood_pressure'
+  | 'blood_lipids'
+  | 'blood_sugar'
+  | 'heart_rate'
+  | 'body_fat'
+  | 'other';
+
+export interface HealthMetric {
+  id: string;
+  user_id: string;
+  metric_type: MetricType;
+  value: string; // JSON string
+  unit: string | null;
+  recorded_at: string | null;
+  created_at: string;
+}
+
+export interface CreateHealthMetricRequest {
+  metric_type: MetricType;
+  value: string;
+  unit?: string;
+  recorded_at?: string;
+}
+
+// ============ Conditions ============
+
+export type Severity = 'mild' | 'moderate' | 'severe';
+export type ConditionStatus = 'active' | 'recovered';
+
+export interface Condition {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  severity: Severity | null;
+  status: ConditionStatus;
+  created_at: string;
+}
+
+export interface CreateConditionRequest {
+  name: string;
+  description?: string;
+  severity?: Severity;
+}
+
+// ============ Training Goals ============
+
+export type TrainingGoalStatus = 'active' | 'completed';
+
+export interface TrainingGoal {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  status: TrainingGoalStatus;
+  created_at: string;
+}
+
+export interface CreateTrainingGoalRequest {
+  name: string;
+  description?: string;
+}
+
+// ============ Training Plans ============
+
+export interface TrainingPlan {
+  id: string;
+  user_id: string;
+  plan_date: string;
+  content: string; // JSON string
+  completed: number;
+  notes: string | null;
+  created_at: string;
+}
+
+// ============ Nutrition Plans ============
+
+export interface NutritionPlan {
+  id: string;
+  user_id: string;
+  plan_date: string;
+  content: string; // JSON string
+  created_at: string;
+}
+
+// ============ Chat ============
+
+export type MessageRole = 'user' | 'assistant';
+
+export interface ChatMessage {
+  id: string;
+  user_id: string;
+  role: AIRole;
+  message_role: MessageRole;
+  content: string;
+  image_url: string | null;
+  created_at: string;
+}
+
+export interface ChatRequest {
+  role: AIRole;
+  message: string;
+  image?: string; // base64 data URI
+}
+
+export interface ChatHistoryResponse {
+  messages: ChatMessage[];
+}
+
+export interface OrchestrateHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface OrchestrateChatRequest {
+  message: string;
+  history?: OrchestrateHistoryMessage[];
+  image?: string;
+  image_key?: string;
+  auto_writeback?: boolean;
+}
+
+export interface OrchestrateAutoWriteSummary {
+  profile_updated: boolean;
+  conditions_upserted: number;
+  training_goals_upserted: number;
+  health_metrics_created: number;
+  nutrition_plan_created: boolean;
+  supplement_plan_created: boolean;
+  daily_log_upserted: boolean;
+}
+
+// ============ SSE Events (Supervisor Multi-Agent) ============
+
+export interface SSERoutingEvent {
+  primary_role: AIRole;
+  primary_role_name: string;
+  collaborators: Array<{ role: AIRole; role_name: string }>;
+  reason: string;
+}
+
+export interface SSESupplementEvent {
+  role: AIRole;
+  role_name: string;
+  content: string;
+}
+
+export interface OrchestrateChatResponse {
+  answer: string;
+  primary_role: AIRole;
+  collaborators: AIRole[];
+  routing_reason: string;
+  auto_writeback: boolean;
+  updates: OrchestrateAutoWriteSummary;
+}
+
+export interface WritebackAudit {
+  id: string;
+  source: 'orchestrate' | 'orchestrate_stream' | string;
+  status: 'success' | 'failed' | string;
+  summary: OrchestrateAutoWriteSummary | null;
+  error: string | null;
+  message_excerpt: string | null;
+  created_at: string;
+}
+
+// ============ API Response ============
+
+export interface ApiResponse<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+// ============ Diet Records ============
+
+export type MealType = 'breakfast' | 'lunch' | 'dinner' | 'snack';
+
+export interface DietRecord {
+  id: string;
+  user_id: string;
+  meal_type: MealType;
+  record_date: string;
+  food_description: string;
+  foods_json: string | null;
+  calories: number | null;
+  protein: number | null;
+  fat: number | null;
+  carbs: number | null;
+  image_key: string | null;
+  created_at: string;
+}
+
+export interface FoodItem {
+  name: string;
+  amount: string;
+  calories: number;
+  protein: number;
+  fat: number;
+  carbs: number;
+}
+
+export interface FoodAnalysisResult {
+  foods: FoodItem[];
+  total: { calories: number; protein: number; fat: number; carbs: number };
+}
+
+export interface CreateDietRecordRequest {
+  meal_type: MealType;
+  record_date: string;
+  food_description: string;
+  foods_json?: string;
+  calories?: number;
+  protein?: number;
+  fat?: number;
+  carbs?: number;
+  image_key?: string;
+}
+
+// ============ Daily Logs ============
+
+export type SleepQuality = 'good' | 'fair' | 'poor';
+
+export interface DailyLog {
+  id: string;
+  user_id: string;
+  log_date: string;
+  weight: number | null;
+  sleep_hours: number | null;
+  sleep_quality: SleepQuality | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface UpsertDailyLogRequest {
+  log_date: string;
+  weight?: number | null;
+  sleep_hours?: number | null;
+  sleep_quality?: SleepQuality | null;
+  note?: string | null;
+}

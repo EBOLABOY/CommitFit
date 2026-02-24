@@ -1,0 +1,12 @@
+backend/node_modules/
+backend/.wrangler/
+backend/.wrangler-out/
+backend/.dev.vars
+backend/dist/
+backend/tmp_*.ps1
+mobile/node_modules/
+mobile/.expo/
+mobile/expo_*_out.log
+mobile/expo_*_err.log
+mobile/ts_errors.log
+.claude/

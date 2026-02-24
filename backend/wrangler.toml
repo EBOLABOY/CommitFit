@@ -1,0 +1,31 @@
+name = "lianlema-backend"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+routes = [
+  { pattern = "api-lite.izlx.de5.net", custom_domain = true }
+]
+
+[vars]
+LLM_MODEL = "LLM"
+LLM_FALLBACK_MODELS = "LLM1"
+LLM_BASE_URL = "https://api.izlx.de/v1"
+ALLOWED_ORIGINS = "http://localhost:8081"
+
+# Secrets (set via: wrangler secret put <NAME>)
+# JWT_SECRET
+# LLM_API_KEY
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lianlema-db"
+database_id = "00961e6f-b7be-46f1-90da-3f4538a79232"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "5fd36595d91e42a5b629fa4a541754ea"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "lianlema-images"

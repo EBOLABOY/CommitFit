@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "练了码",
+    "slug": "lianlema",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "lianlema",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.lianlema.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.lianlema.app"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许练了码访问你的相册以发送体检报告等图片",
+          "cameraPermission": "允许练了码使用相机拍摄体检报告等图片"
+        }
+      ]
+    ]
+  }
+}
