@@ -13,6 +13,7 @@ export type Bindings = {
   JWT_SECRET: string;
   ALLOWED_ORIGINS?: string;
   ACTIVE_AI_ROLE?: string;
+  WRITEBACK_MODE?: string; // remote / local_first
 };
 
 export type Variables = {

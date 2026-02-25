@@ -10,6 +10,7 @@ import { LoadingScreen } from '../components/ui';
 import { useThemeColor } from '../hooks/useThemeColor';
 import Toast from 'react-native-toast-message';
 import { toastConfig } from '../components/ToastConfig';
+import { useWritebackOutboxStore } from '../stores/writeback-outbox';
 
 export default function RootLayout() {
   const { isAuthenticated, setUser } = useAuthStore();
@@ -18,6 +19,7 @@ export default function RootLayout() {
   const Colors = useThemeColor();
   const colorScheme = useColorScheme();
   const [isReady, setIsReady] = useState(false);
+  const flushWritebackOutbox = useWritebackOutboxStore((s) => s.flush);
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -63,6 +65,16 @@ export default function RootLayout() {
       router.replace('/(tabs)');
     }
   }, [isAuthenticated, segments, router, isReady]);
+
+  // Local-First：应用启动/网络恢复后自动 flush Outbox，把草稿幂等提交到远端
+  useEffect(() => {
+    if (!isReady || !isAuthenticated) return;
+    void flushWritebackOutbox();
+    const timer = setInterval(() => {
+      void flushWritebackOutbox();
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [isReady, isAuthenticated, flushWritebackOutbox]);
 
   if (!isReady || !fontsLoaded) return <LoadingScreen />;
 

@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS ai_writeback_audits (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Local-First 写回提交幂等表：用于保证同一 draft_id 只会被应用一次（可安全重试）
+CREATE TABLE IF NOT EXISTS writeback_commits (
+  draft_id TEXT PRIMARY KEY,
+  user_id TEXT REFERENCES users(id),
+  status TEXT NOT NULL,              -- pending / success / failed
+  payload_json TEXT NOT NULL,
+  summary_json TEXT,
+  error TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- 饮食记录
 CREATE TABLE IF NOT EXISTS diet_records (
   id TEXT PRIMARY KEY,
@@ -134,5 +146,6 @@ CREATE INDEX IF NOT EXISTS idx_training_plans_user ON training_plans(user_id, pl
 CREATE INDEX IF NOT EXISTS idx_nutrition_plans_user ON nutrition_plans(user_id, plan_date);
 CREATE INDEX IF NOT EXISTS idx_chat_history_user_role ON chat_history(user_id, role, created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_writeback_audits_user ON ai_writeback_audits(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_writeback_commits_user ON writeback_commits(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_diet_records_user ON diet_records(user_id, record_date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_logs_user_date ON daily_logs(user_id, log_date);

@@ -12,6 +12,7 @@ import { imageRoutes } from './routes/images';
 import { dietRoutes } from './routes/diet';
 import { dailyLogRoutes } from './routes/daily-logs';
 import { trainingGoalRoutes } from './routes/training-goals';
+import { writebackRoutes } from './routes/writeback';
 import { SupervisorAgent } from './agents/supervisor-agent';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -55,6 +56,7 @@ app.route('/api/images', imageRoutes);
 app.route('/api/diet', dietRoutes);
 app.route('/api/daily-logs', dailyLogRoutes);
 app.route('/api/training-goals', trainingGoalRoutes);
+app.route('/api/writeback', writebackRoutes);
 
 export default app;
 export {

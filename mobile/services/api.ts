@@ -192,4 +192,8 @@ export const api = {
     request(`/api/daily-logs${limit ? `?limit=${limit}` : ''}`),
   upsertDailyLog: (data: UpsertDailyLogRequest) =>
     request('/api/daily-logs', { method: 'PUT', body: JSON.stringify(data) }),
+
+  // Local-First writeback commit (idempotent)
+  commitWriteback: (data: { draft_id: string; payload: Record<string, unknown>; context_text?: string }) =>
+    request('/api/writeback/commit', { method: 'POST', body: JSON.stringify(data) }),
 };

@@ -15,6 +15,7 @@ ROLE_LLM_MODEL = "LLM1"
 LLM_BASE_URL = "https://api.izlx.de/v1"
 ALLOWED_ORIGINS = "http://localhost:8081"
 ACTIVE_AI_ROLE = "trainer"
+WRITEBACK_MODE = "local_first"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # JWT_SECRET

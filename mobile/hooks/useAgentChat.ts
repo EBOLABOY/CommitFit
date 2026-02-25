@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getToken } from '../services/api';
 import { API_BASE_URL, SUPERVISOR_AGENT_NAMESPACE } from '../constants';
+import { useWritebackOutboxStore } from '../stores/writeback-outbox';
 import type {
   AIRole,
   OrchestrateAutoWriteSummary,
@@ -83,6 +84,10 @@ function parseWSJSON(rawData: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function extractErrorText(value: unknown): string {
   if (!value || typeof value !== 'object') return '服务端返回错误';
   const obj = value as Record<string, unknown>;
@@ -159,9 +164,14 @@ export function useAgentChat(sessionId = 'default') {
   const [writebackSummary, setWritebackSummary] = useState<OrchestrateAutoWriteSummary | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingToolApproval | null>(null);
 
+  // Local-First：sync_profile 工具不直接写远端，而是产出草稿写入 Outbox，再通过 HTTP commit 幂等提交
+  const enqueueWritebackDraft = useWritebackOutboxStore((s) => s.enqueueDraft);
+  const commitWritebackDraft = useWritebackOutboxStore((s) => s.commitDraft);
+
   // 幂等处理：同一个 toolCallId 可能在断线重连/流恢复时被重复推送，避免重复弹窗。
   const toolApprovalDecisionRef = useRef<Map<string, boolean>>(new Map());
   const pendingApprovalRef = useRef<PendingToolApproval | null>(null);
+  const toolCallInfoRef = useRef<Map<string, { toolName: string; input: Record<string, unknown> }>>(new Map());
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -456,11 +466,30 @@ export function useAgentChat(sessionId = 'default') {
         // Text part ended (but stream may continue with tool calls etc.)
         break;
       }
-      case 'tool-approval-request': {
-        // Tool needs human approval
+      case 'tool-input-available': {
         const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
         const toolName = typeof chunk.toolName === 'string' ? chunk.toolName : '';
         if (!toolCallId || !toolName) break;
+        const input = isPlainObject(chunk.input) ? chunk.input : {};
+        toolCallInfoRef.current.set(toolCallId, { toolName, input });
+        break;
+      }
+      case 'tool-input-error': {
+        const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
+        const toolName = typeof chunk.toolName === 'string' ? chunk.toolName : '';
+        if (!toolCallId || !toolName) break;
+        const input = isPlainObject(chunk.input) ? chunk.input : {};
+        toolCallInfoRef.current.set(toolCallId, { toolName, input });
+        break;
+      }
+      case 'tool-approval-request': {
+        // Tool needs human approval (toolName / input 需要从 tool-input-available 中关联)
+        const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
+        if (!toolCallId) break;
+
+        const meta = toolCallInfoRef.current.get(toolCallId);
+        const toolName = meta?.toolName || 'unknown';
+        const input = meta?.input || {};
 
         // 若已对该 toolCallId 做出过决定（同意/拒绝），直接重发决定，避免重复弹窗。
         const decided = toolApprovalDecisionRef.current.get(toolCallId);
@@ -485,9 +514,60 @@ export function useAgentChat(sessionId = 'default') {
         const currentPending = pendingApprovalRef.current;
         if (currentPending && currentPending.toolCallId === toolCallId) break;
 
-        const input = (chunk.input || {}) as Record<string, unknown>;
-        const summaryText = (input.summary_text as string) || '确认同步以下数据？';
+        const summaryText =
+          (typeof input.summary_text === 'string' && input.summary_text.trim())
+            ? input.summary_text
+            : '确认同步以下数据？';
         setPendingApproval({ toolCallId, toolName, args: input, summaryText });
+        break;
+      }
+      case 'tool-output-available': {
+        const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
+        if (!toolCallId) break;
+
+        const meta = toolCallInfoRef.current.get(toolCallId);
+        const toolName = meta?.toolName || '';
+        const output = chunk.output;
+
+        if (toolName === 'sync_profile') {
+          if (isPlainObject(output)) {
+            // Local-First output: { success, draft_id, payload, context_text, summary_text }
+            if (output.success === false) {
+              setError(typeof output.error === 'string' ? output.error : '档案同步草稿生成失败');
+            } else if (typeof output.draft_id === 'string' && output.draft_id.trim()) {
+              const draftId = output.draft_id.trim();
+              const summaryText =
+                (typeof output.summary_text === 'string' && output.summary_text.trim())
+                  ? output.summary_text
+                  : (typeof meta?.input?.summary_text === 'string' ? meta?.input?.summary_text : '已生成同步草稿');
+              const payload = isPlainObject(output.payload) ? output.payload : {};
+              const contextText = typeof output.context_text === 'string' ? output.context_text : '';
+
+              enqueueWritebackDraft({
+                draft_id: draftId,
+                tool_call_id: toolCallId,
+                summary_text: summaryText,
+                payload,
+                context_text: contextText,
+              });
+
+              void commitWritebackDraft(draftId).then((summary) => {
+                if (summary) setWritebackSummary(summary);
+              });
+            } else if (isPlainObject(output.changes)) {
+              // remote writeback mode: tool 返回 changes
+              setWritebackSummary(output.changes as unknown as OrchestrateAutoWriteSummary);
+            }
+          }
+        }
+
+        toolCallInfoRef.current.delete(toolCallId);
+        break;
+      }
+      case 'tool-output-error':
+      case 'tool-output-denied': {
+        const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
+        if (toolCallId) toolCallInfoRef.current.delete(toolCallId);
         break;
       }
       case 'error': {
@@ -509,10 +589,10 @@ export function useAgentChat(sessionId = 'default') {
         break;
       default:
         // tool-input-start, tool-input-delta, tool-input-end,
-        // tool-output-available, tool-output-error, source, file, etc.
+        // source-url, file, etc.
         break;
     }
-  }, []);
+  }, [enqueueWritebackDraft, commitWritebackDraft]);
 
   const appendToCurrentAssistant = useCallback((text: string) => {
     const assistantId = currentAssistantIdRef.current;

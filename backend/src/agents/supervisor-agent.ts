@@ -178,8 +178,8 @@ const INCOMPLETE_TOOL_STATES = new Set([
 /**
  * 清理消息历史中「孤立的 tool-invocation」part，防止 convertToModelMessages 报错。
  *
- * 问题根因：
- *   sync_profile 工具设置了 needsApproval: true，AIChatAgent 会在
+ * 问题根因（旧架构）：
+ *   sync_profile 工具设置了 needsApproval: true（远端直写 + 人工确认），AIChatAgent 会在
  *   approval-requested 状态时将 assistant 消息持久化到 SQLite。
  *   若用户此时关闭 App 或断网，tool_result 永远不会写回。
  *   下次发消息时 convertToModelMessages 检测到"有 tool_call 无 tool_result"
@@ -398,35 +398,51 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           : `简单任务：主模型快速处理（${executionDecision.reason}）`,
       });
 
-      // Track whether the sync_profile tool was executed
-      let toolExecuted = false;
+      const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
+      const writebackMode = writebackModeRaw.toLowerCase();
+      const isLocalFirstWriteback = writebackMode !== 'remote';
 
       const syncProfileTool = tool({
         description: '当识别到用户健康数据或记录类数据（体重、睡眠、伤病、训练目标、训练记录、饮食记录等）时调用，将数据同步到用户档案与记录表。请在回复完用户问题后调用。',
         inputSchema: syncProfileToolSchema,
-        needsApproval: true,
+        // Local-First：工具仅生成草稿，不直接写远端，因此不需要人工审批。
+        // remote 模式保留旧行为（直写远端 + needsApproval）以便回滚/灰度。
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
-          toolExecuted = true;
           try {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
             const { summary_text, ...writebackPayload } = args;
-            const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
-              contextText: userText,
-            });
-            const syncBroadcast: ProfileSyncResultBroadcast = {
-              type: 'profile_sync_result',
-              summary,
+
+            if (!isLocalFirstWriteback) {
+              const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
+                contextText: userText,
+              });
+              const syncBroadcast: ProfileSyncResultBroadcast = {
+                type: 'profile_sync_result',
+                summary,
+              };
+              this.broadcastCustom(syncBroadcast);
+              try {
+                await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
+              } catch { /* ignore */ }
+              return { success: true, summary_text: args.summary_text, changes: summary };
+            }
+
+            const draftId = crypto.randomUUID();
+            return {
+              success: true,
+              draft_id: draftId,
+              summary_text,
+              payload: writebackPayload,
+              context_text: userText,
             };
-            this.broadcastCustom(syncBroadcast);
-            try {
-              await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
-            } catch { /* ignore */ }
-            return { success: true, summary_text: args.summary_text, changes: summary };
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : '档案同步失败';
-            try {
-              await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
-            } catch { /* ignore */ }
+            if (!isLocalFirstWriteback) {
+              try {
+                await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
+              } catch { /* ignore */ }
+            }
             return { success: false, error: errMsg };
           }
         },

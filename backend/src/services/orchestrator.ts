@@ -1158,7 +1158,7 @@ export async function saveOrchestrateAssistantMessage(
     .run();
 }
 
-export type WritebackAuditSource = 'orchestrate' | 'orchestrate_stream';
+export type WritebackAuditSource = 'orchestrate' | 'orchestrate_stream' | 'writeback_commit';
 
 export async function recordWritebackAudit(
   db: D1Database,
