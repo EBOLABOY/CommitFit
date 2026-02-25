@@ -302,15 +302,25 @@ export default function AIChatScreen() {
   const writebackText = useMemo(() => {
     if (!writebackSummary) return '';
     const tags: string[] = [];
+    if (writebackSummary.user_updated) tags.push('用户信息');
     if (writebackSummary.profile_updated) tags.push('身体档案');
-    if (writebackSummary.conditions_upserted > 0) tags.push(`伤病记录 ${writebackSummary.conditions_upserted} 条`);
-    if (writebackSummary.training_goals_upserted > 0) tags.push(`训练目标 ${writebackSummary.training_goals_upserted} 条`);
-    if (writebackSummary.health_metrics_created > 0) tags.push(`理化指标 ${writebackSummary.health_metrics_created} 条`);
-    if (writebackSummary.training_plan_created) tags.push('训练记录');
-    if (writebackSummary.nutrition_plan_created) tags.push('营养方案');
-    if (writebackSummary.supplement_plan_created) tags.push('补剂方案');
-    if (writebackSummary.diet_records_created > 0) tags.push(`饮食记录 ${writebackSummary.diet_records_created} 条`);
-    if (writebackSummary.daily_log_upserted) tags.push('体重/睡眠日志');
+    if (writebackSummary.conditions_upserted > 0) tags.push(`伤病记录 更新 ${writebackSummary.conditions_upserted} 条`);
+    if ((writebackSummary.conditions_deleted || 0) > 0) tags.push(`伤病记录 删除 ${writebackSummary.conditions_deleted} 条`);
+    if (writebackSummary.training_goals_upserted > 0) tags.push(`训练目标 更新 ${writebackSummary.training_goals_upserted} 条`);
+    if ((writebackSummary.training_goals_deleted || 0) > 0) tags.push(`训练目标 删除 ${writebackSummary.training_goals_deleted} 条`);
+    if (writebackSummary.health_metrics_created > 0) tags.push(`理化指标 新增 ${writebackSummary.health_metrics_created} 条`);
+    if ((writebackSummary.health_metrics_updated || 0) > 0) tags.push(`理化指标 更新 ${writebackSummary.health_metrics_updated} 条`);
+    if ((writebackSummary.health_metrics_deleted || 0) > 0) tags.push(`理化指标 删除 ${writebackSummary.health_metrics_deleted} 条`);
+    if (writebackSummary.training_plan_created) tags.push('训练计划 已保存');
+    if (writebackSummary.training_plan_deleted) tags.push('训练计划 已删除');
+    if (writebackSummary.nutrition_plan_created) tags.push('饮食方案 已保存');
+    if (writebackSummary.nutrition_plan_deleted) tags.push('饮食方案 已删除');
+    if (writebackSummary.supplement_plan_created) tags.push('补剂方案 已保存');
+    if (writebackSummary.supplement_plan_deleted) tags.push('补剂方案 已删除');
+    if (writebackSummary.diet_records_created > 0) tags.push(`饮食记录 新增/更新 ${writebackSummary.diet_records_created} 条`);
+    if ((writebackSummary.diet_records_deleted || 0) > 0) tags.push(`饮食记录 删除 ${writebackSummary.diet_records_deleted} 条`);
+    if (writebackSummary.daily_log_upserted) tags.push('体重/睡眠日志 已保存');
+    if (writebackSummary.daily_log_deleted) tags.push('体重/睡眠日志 已删除');
     return tags.length > 0 ? `已同步：${tags.join('、')}` : '';
   }, [writebackSummary]);
 

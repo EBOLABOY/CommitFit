@@ -86,6 +86,12 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
       if (ctx.healthMetrics.length > 0) {
         parts.push('理化指标记录：' + toCompactJson(ctx.healthMetrics, 2400));
       }
+      if (ctx.conditions.length > 0) {
+        parts.push('伤病记录（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.conditions, 900));
+      }
+      if (ctx.trainingGoals.length > 0) {
+        parts.push('训练目标（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.trainingGoals, 1400));
+      }
       if (ctx.recentDailyLogs.length > 0) {
         parts.push('近期身体日志（体重/睡眠）：' + toCompactJson(ctx.recentDailyLogs, 1200));
       }
@@ -95,6 +101,10 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
       parts.push(profileStr);
       if (ctx.conditions.length > 0) {
         parts.push('当前伤病/外科问题：' + ctx.conditions.map((c) => `${c.name}(${c.severity || '未标注严重程度'}): ${c.description || '无详细描述'}`).join('；'));
+        parts.push('伤病记录（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.conditions, 1600));
+      }
+      if (ctx.trainingGoals.length > 0) {
+        parts.push('训练目标（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.trainingGoals, 1400));
       }
       if (ctx.healthMetrics.length > 0) {
         parts.push('相关理化指标：' + toCompactJson(ctx.healthMetrics, 1800));
@@ -109,11 +119,15 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
       if (ctx.healthMetrics.length > 0) {
         parts.push('理化指标：' + toCompactJson(ctx.healthMetrics, 1400));
       }
+      if (ctx.trainingGoals.length > 0) {
+        parts.push('训练目标（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.trainingGoals, 1200));
+      }
       if (ctx.recentTraining.length > 0) {
         parts.push('近期训练计划：' + toCompactJson(ctx.recentTraining, 1200));
       }
       if (ctx.conditions.length > 0) {
         parts.push('伤病情况：' + ctx.conditions.map((c) => `${c.name}`).join('、'));
+        parts.push('伤病记录（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.conditions, 900));
       }
       if (ctx.recentDiet.length > 0) {
         parts.push('近期饮食记录：' + toCompactJson(ctx.recentDiet, 1200));
@@ -128,8 +142,12 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
       if (ctx.healthMetrics.length > 0) {
         parts.push('理化指标：' + toCompactJson(ctx.healthMetrics, 1400));
       }
+      if (ctx.trainingGoals.length > 0) {
+        parts.push('训练目标（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.trainingGoals, 1400));
+      }
       if (ctx.conditions.length > 0) {
         parts.push('伤病情况：' + ctx.conditions.map((c) => `${c.name}(${c.severity || ''}${c.status === 'recovered' ? '，已恢复' : ''}): ${c.description || ''}`).join('；'));
+        parts.push('伤病记录（含 id，供 AI 修改/删除用）：' + toCompactJson(ctx.conditions, 1600));
       }
       if (ctx.recentNutrition.length > 0) {
         parts.push('近期营养方案：' + toCompactJson(ctx.recentNutrition, 1200));

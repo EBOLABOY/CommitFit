@@ -18,14 +18,24 @@ export interface OrchestrateHistoryMessage {
 
 export interface OrchestrateAutoWriteSummary {
   profile_updated: boolean;
+  user_updated?: boolean;
   conditions_upserted: number;
+  conditions_deleted?: number;
   training_goals_upserted: number;
+  training_goals_deleted?: number;
   health_metrics_created: number;
+  health_metrics_updated?: number;
+  health_metrics_deleted?: number;
   training_plan_created: boolean;
+  training_plan_deleted?: boolean;
   nutrition_plan_created: boolean;
+  nutrition_plan_deleted?: boolean;
   supplement_plan_created: boolean;
+  supplement_plan_deleted?: boolean;
   diet_records_created: number;
+  diet_records_deleted?: number;
   daily_log_upserted: boolean;
+  daily_log_deleted?: boolean;
 }
 
 export interface OrchestrateResult {
@@ -124,18 +134,46 @@ interface ExtractedDailyLog {
   note?: string | null;
 }
 
+interface ExtractedUserPatch {
+  nickname?: string | null;
+  avatar_key?: string | null;
+}
+
+interface ExtractedHealthMetricUpdate {
+  id?: string;
+  value?: string;
+  unit?: string | null;
+  recorded_at?: string | null;
+}
+
+interface ExtractedDietRecordDelete {
+  id?: string;
+  meal_type?: MealType;
+  record_date?: string | null;
+}
+
 interface ExtractedWritebackPayload {
+  user?: ExtractedUserPatch;
   profile?: ExtractedProfilePatch;
   conditions?: ExtractedCondition[];
   conditions_mode?: ConditionsWriteMode | null;
+  conditions_delete_ids?: string[];
   training_goals?: ExtractedTrainingGoal[];
   training_goals_mode?: TrainingGoalsWriteMode | null;
+  training_goals_delete_ids?: string[];
   health_metrics?: ExtractedMetric[];
+  health_metrics_update?: ExtractedHealthMetricUpdate[];
+  health_metrics_delete_ids?: string[];
   training_plan?: ExtractedTrainingPlan | null;
+  training_plan_delete_date?: string | null;
   nutrition_plan?: ExtractedPlan | null;
+  nutrition_plan_delete_date?: string | null;
   supplement_plan?: ExtractedPlan | null;
+  supplement_plan_delete_date?: string | null;
   diet_records?: ExtractedDietRecord[];
+  diet_records_delete?: ExtractedDietRecordDelete[];
   daily_log?: ExtractedDailyLog | null;
+  daily_log_delete_date?: string | null;
 }
 
 export const SYSTEM_PROMPTS: Record<AIRole, string> = {
@@ -552,6 +590,7 @@ export async function extractWritebackPayload(
   const prompt = [
     '你是结构化信息提取器。根据输入内容抽取可写回数据。',
     '仅在信息明确时填写；不明确请填 null 或空数组；禁止臆造。',
+    '禁止操作账户/密码相关字段（例如 email、password、password_hash、JWT 等）。',
     '当用户明确要求清空伤病记录时，设置 conditions_mode="clear_all"；若是“先清空再设置新伤病记录”，设置 conditions_mode="replace_all" 并填充 conditions。',
     '当用户明确要求清空训练目标时，设置 training_goals_mode="clear_all"；若是“先清空再设置新目标”，设置 training_goals_mode="replace_all" 并填充 training_goals。',
     '训练目标必须从【用户最新问题/近期对话】中抽取，不要把【最终答复】里的确认语或客套话写入 training_goals。',
@@ -559,7 +598,7 @@ export async function extractWritebackPayload(
     '训练计划（training_plan.content）通常来自【最终答复】中的计划正文。',
     '必须只输出 JSON，不要 markdown，不要解释。',
     'JSON 模板：',
-    '{"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"conditions_mode":"upsert","training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"nutrition_plan":{"content":"","plan_date":null},"supplement_plan":{"content":"","plan_date":null},"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null}}',
+    '{"user":{"nickname":null,"avatar_key":null},"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"conditions_mode":"upsert","conditions_delete_ids":[],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","training_goals_delete_ids":[],"health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"health_metrics_update":[{"id":"","value":"","unit":null,"recorded_at":null}],"health_metrics_delete_ids":[],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"training_plan_delete_date":null,"nutrition_plan":{"content":"","plan_date":null},"nutrition_plan_delete_date":null,"supplement_plan":{"content":"","plan_date":null},"supplement_plan_delete_date":null,"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"diet_records_delete":[{"id":"","meal_type":"lunch","record_date":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null},"daily_log_delete_date":null}',
     '',
     `用户最新问题：${message}`,
     historyText ? `近期对话：\n${historyText}` : '近期对话：无',
@@ -626,6 +665,7 @@ function normalizeWritebackPayload(payload: ExtractedWritebackPayload | null | u
   const conditionsMode = normalizeConditionsMode(payload.conditions_mode);
   const trainingGoalsMode = normalizeTrainingGoalsMode(payload.training_goals_mode);
 
+  if (hasMeaningfulObjectValue(payload.user)) normalized.user = payload.user;
   if (hasMeaningfulObjectValue(payload.profile)) normalized.profile = payload.profile;
   if (Array.isArray(payload.conditions) && payload.conditions.length > 0) {
     normalized.conditions = payload.conditions;
@@ -633,32 +673,69 @@ function normalizeWritebackPayload(payload: ExtractedWritebackPayload | null | u
   } else if (conditionsMode) {
     normalized.conditions_mode = conditionsMode;
   }
+  if (Array.isArray(payload.conditions_delete_ids) && payload.conditions_delete_ids.length > 0) {
+    normalized.conditions_delete_ids = payload.conditions_delete_ids;
+  }
   if (Array.isArray(payload.training_goals) && payload.training_goals.length > 0) {
     normalized.training_goals = payload.training_goals;
     normalized.training_goals_mode = trainingGoalsMode ?? 'upsert';
   } else if (trainingGoalsMode) {
     normalized.training_goals_mode = trainingGoalsMode;
   }
+  if (Array.isArray(payload.training_goals_delete_ids) && payload.training_goals_delete_ids.length > 0) {
+    normalized.training_goals_delete_ids = payload.training_goals_delete_ids;
+  }
   if (Array.isArray(payload.health_metrics) && payload.health_metrics.length > 0) normalized.health_metrics = payload.health_metrics;
+  if (Array.isArray(payload.health_metrics_update) && payload.health_metrics_update.length > 0) {
+    normalized.health_metrics_update = payload.health_metrics_update;
+  }
+  if (Array.isArray(payload.health_metrics_delete_ids) && payload.health_metrics_delete_ids.length > 0) {
+    normalized.health_metrics_delete_ids = payload.health_metrics_delete_ids;
+  }
   if (hasMeaningfulObjectValue(payload.training_plan)) normalized.training_plan = payload.training_plan;
+  if (typeof payload.training_plan_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.training_plan_delete_date)) {
+    normalized.training_plan_delete_date = payload.training_plan_delete_date;
+  }
   if (hasMeaningfulObjectValue(payload.nutrition_plan)) normalized.nutrition_plan = payload.nutrition_plan;
+  if (typeof payload.nutrition_plan_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.nutrition_plan_delete_date)) {
+    normalized.nutrition_plan_delete_date = payload.nutrition_plan_delete_date;
+  }
   if (hasMeaningfulObjectValue(payload.supplement_plan)) normalized.supplement_plan = payload.supplement_plan;
+  if (typeof payload.supplement_plan_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.supplement_plan_delete_date)) {
+    normalized.supplement_plan_delete_date = payload.supplement_plan_delete_date;
+  }
   if (Array.isArray(payload.diet_records) && payload.diet_records.length > 0) normalized.diet_records = payload.diet_records;
+  if (Array.isArray(payload.diet_records_delete) && payload.diet_records_delete.length > 0) {
+    normalized.diet_records_delete = payload.diet_records_delete;
+  }
   if (hasMeaningfulObjectValue(payload.daily_log)) normalized.daily_log = payload.daily_log;
+  if (typeof payload.daily_log_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.daily_log_delete_date)) {
+    normalized.daily_log_delete_date = payload.daily_log_delete_date;
+  }
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
 export function hasWritebackChanges(summary: OrchestrateAutoWriteSummary): boolean {
   return Boolean(
+    summary.user_updated ||
     summary.profile_updated ||
     summary.conditions_upserted > 0 ||
+    (summary.conditions_deleted || 0) > 0 ||
     summary.training_goals_upserted > 0 ||
+    (summary.training_goals_deleted || 0) > 0 ||
     summary.health_metrics_created > 0 ||
+    (summary.health_metrics_updated || 0) > 0 ||
+    (summary.health_metrics_deleted || 0) > 0 ||
     summary.training_plan_created ||
+    summary.training_plan_deleted ||
     summary.nutrition_plan_created ||
+    summary.nutrition_plan_deleted ||
     summary.supplement_plan_created ||
+    summary.supplement_plan_deleted ||
     summary.diet_records_created > 0 ||
+    (summary.diet_records_deleted || 0) > 0 ||
     summary.daily_log_upserted
+    || summary.daily_log_deleted
   );
 }
 
@@ -735,6 +812,68 @@ async function applyProfilePatch(db: D1Database, userId: string, patch: Extracte
   return true;
 }
 
+function isValidAvatarKeyForUser(key: string, userId: string): boolean {
+  return key.startsWith(`chat-images/${userId}/`);
+}
+
+async function applyUserPatch(db: D1Database, userId: string, patch: ExtractedUserPatch | undefined): Promise<boolean> {
+  if (!patch || typeof patch !== 'object') return false;
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (patch.nickname !== undefined) {
+    if (patch.nickname === null) {
+      fields.push('nickname = ?');
+      values.push(null);
+    } else if (typeof patch.nickname === 'string') {
+      const nickname = normalizeString(patch.nickname, 50);
+      fields.push('nickname = ?');
+      values.push(nickname || null);
+    }
+  }
+
+  if (patch.avatar_key !== undefined) {
+    if (patch.avatar_key === null) {
+      fields.push('avatar_key = ?');
+      values.push(null);
+    } else if (typeof patch.avatar_key === 'string') {
+      const avatarKey = normalizeString(patch.avatar_key, 512);
+      if (!avatarKey) {
+        fields.push('avatar_key = ?');
+        values.push(null);
+      } else if (isValidAvatarKeyForUser(avatarKey, userId)) {
+        fields.push('avatar_key = ?');
+        values.push(avatarKey);
+      }
+    }
+  }
+
+  if (fields.length === 0) return false;
+  values.push(userId);
+  const res = await db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`)
+    .bind(...values)
+    .run();
+  return Boolean(res.meta?.changes);
+}
+
+async function deleteByIds(db: D1Database, table: string, userId: string, ids: string[] | undefined, max: number): Promise<number> {
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const unique = Array.from(new Set(ids.map((id) => normalizeString(id, 64)).filter((id): id is string => Boolean(id))));
+  if (unique.length === 0) return 0;
+  const statements = unique.slice(0, max).map((id) =>
+    db.prepare(`DELETE FROM ${table} WHERE id = ? AND user_id = ?`).bind(id, userId)
+  );
+  const results = await db.batch(statements);
+  return results.reduce((sum, r) => sum + (r.meta?.changes || 0), 0);
+}
+
+async function countRowsForUser(db: D1Database, table: string, userId: string): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(1) as total FROM ${table} WHERE user_id = ?`)
+    .bind(userId)
+    .first<{ total: number | string | null }>();
+  return Number(row?.total ?? 0);
+}
+
 async function applyConditions(
   db: D1Database,
   userId: string,
@@ -742,16 +881,12 @@ async function applyConditions(
   mode: ConditionsWriteMode | null | undefined
 ): Promise<number> {
   const normalizedMode: ConditionsWriteMode = normalizeConditionsMode(mode) ?? 'upsert';
-
-  const existingCountRow = await db.prepare(
-    'SELECT COUNT(1) as total FROM conditions WHERE user_id = ?'
-  ).bind(userId).first<{ total: number | string | null }>();
-  const existingCount = Number(existingCountRow?.total ?? 0);
+  const existingCount = await countRowsForUser(db, 'conditions', userId);
 
   if (normalizedMode === 'clear_all') {
     if (existingCount <= 0) return 0;
     await db.prepare('DELETE FROM conditions WHERE user_id = ?').bind(userId).run();
-    return existingCount;
+    return 0;
   }
 
   const seen = new Set<string>();
@@ -793,8 +928,7 @@ async function applyConditions(
       );
     }
     await db.batch(statements);
-    if (candidates.length > 0) return candidates.length;
-    return existingCount;
+    return candidates.length;
   }
 
   // upsert
@@ -860,15 +994,12 @@ async function applyTrainingGoals(
     candidates.push({ name, dedupeKey, description, status });
   }
 
-  const existingCountRow = await db.prepare(
-    'SELECT COUNT(1) as total FROM training_goals WHERE user_id = ?'
-  ).bind(userId).first<{ total: number | string | null }>();
-  const existingCount = Number(existingCountRow?.total ?? 0);
+  const existingCount = await countRowsForUser(db, 'training_goals', userId);
 
   if (normalizedMode === 'clear_all') {
     if (existingCount <= 0) return 0;
     await db.prepare('DELETE FROM training_goals WHERE user_id = ?').bind(userId).run();
-    return existingCount;
+    return 0;
   }
 
   if (normalizedMode === 'replace_all') {
@@ -882,8 +1013,7 @@ async function applyTrainingGoals(
       );
     }
     await db.batch(statements);
-    if (candidates.length > 0) return candidates.length;
-    return existingCount;
+    return candidates.length;
   }
 
   if (candidates.length === 0) return 0;
@@ -966,6 +1096,60 @@ async function applyHealthMetrics(db: D1Database, userId: string, rawMetrics: Ex
   return created;
 }
 
+async function applyHealthMetricUpdates(
+  db: D1Database,
+  userId: string,
+  updates: ExtractedHealthMetricUpdate[] | undefined
+): Promise<number> {
+  if (!Array.isArray(updates) || updates.length === 0) return 0;
+  let updated = 0;
+
+  for (const item of updates.slice(0, 10)) {
+    const id = normalizeString(item?.id, 64);
+    if (!id) continue;
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (typeof item?.value === 'string') {
+      const valueText = normalizeString(item.value, 500);
+      if (valueText) {
+        fields.push('value = ?');
+        values.push(valueText);
+      }
+    }
+
+    if (item?.unit !== undefined) {
+      if (item.unit === null) {
+        fields.push('unit = ?');
+        values.push(null);
+      } else if (typeof item.unit === 'string') {
+        const unitText = normalizeString(item.unit, 20);
+        fields.push('unit = ?');
+        values.push(unitText || null);
+      }
+    }
+
+    if (typeof item?.recorded_at === 'string' && DATE_ONLY_REGEX.test(item.recorded_at)) {
+      fields.push('recorded_at = ?');
+      values.push(item.recorded_at);
+    }
+
+    if (fields.length === 0) continue;
+    values.push(id, userId);
+
+    const res = await db.prepare(
+      `UPDATE health_metrics SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`
+    )
+      .bind(...values)
+      .run();
+
+    if (res.meta?.changes) updated += 1;
+  }
+
+  return updated;
+}
+
 async function applyTrainingPlan(
   db: D1Database,
   userId: string,
@@ -994,6 +1178,41 @@ async function applyTrainingPlan(
     .run();
 
   return true;
+}
+
+async function deleteTrainingPlanByDate(
+  db: D1Database,
+  userId: string,
+  rawDate: unknown,
+  contextText?: string
+): Promise<boolean> {
+  const planDate = inferTrainingPlanDate(rawDate, contextText || '');
+  const res = await db.prepare('DELETE FROM training_plans WHERE user_id = ? AND plan_date = ?')
+    .bind(userId, planDate)
+    .run();
+  return Boolean(res.meta?.changes);
+}
+
+async function deleteNutritionPlanByDate(
+  db: D1Database,
+  userId: string,
+  rawDate: unknown,
+  type: 'nutrition' | 'supplement',
+  contextText?: string
+): Promise<boolean> {
+  const planDate = inferTrainingPlanDate(rawDate, contextText || '');
+  const res = type === 'supplement'
+    ? await db.prepare(
+      "DELETE FROM nutrition_plans WHERE user_id = ? AND plan_date = ? AND content LIKE '【补剂方案】%'"
+    )
+      .bind(userId, planDate)
+      .run()
+    : await db.prepare(
+      "DELETE FROM nutrition_plans WHERE user_id = ? AND plan_date = ? AND content NOT LIKE '【补剂方案】%'"
+    )
+      .bind(userId, planDate)
+      .run();
+  return Boolean(res.meta?.changes);
 }
 
 async function applyDietRecords(
@@ -1061,6 +1280,51 @@ async function applyDietRecords(
   return created;
 }
 
+async function deleteDietRecords(
+  db: D1Database,
+  userId: string,
+  deletes: ExtractedDietRecordDelete[] | undefined,
+  contextText?: string
+): Promise<number> {
+  if (!Array.isArray(deletes) || deletes.length === 0) return 0;
+
+  let deleted = 0;
+  const seen = new Set<string>();
+
+  for (const item of deletes.slice(0, 8)) {
+    const id = normalizeString(item?.id, 64);
+    if (id) {
+      if (seen.has(`id:${id}`)) continue;
+      seen.add(`id:${id}`);
+      // eslint-disable-next-line no-await-in-loop
+      const res = await db.prepare('DELETE FROM diet_records WHERE id = ? AND user_id = ?')
+        .bind(id, userId)
+        .run();
+      deleted += res.meta?.changes || 0;
+      continue;
+    }
+
+    const mealType =
+      typeof item?.meal_type === 'string' && VALID_MEAL_TYPES.includes(item.meal_type as MealType)
+        ? (item.meal_type as MealType)
+        : null;
+    if (!mealType) continue;
+
+    const recordDate = inferRecordDate(item?.record_date, contextText || '');
+    const dedupeKey = `${mealType}|${recordDate}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    // eslint-disable-next-line no-await-in-loop
+    const res = await db.prepare('DELETE FROM diet_records WHERE user_id = ? AND meal_type = ? AND record_date = ?')
+      .bind(userId, mealType, recordDate)
+      .run();
+    deleted += res.meta?.changes || 0;
+  }
+
+  return deleted;
+}
+
 async function applyNutritionPlan(
   db: D1Database,
   userId: string,
@@ -1074,6 +1338,21 @@ async function applyNutritionPlan(
   const content = type === 'supplement' && !contentRaw.startsWith('【补剂方案】')
     ? `【补剂方案】\n${contentRaw}`
     : contentRaw;
+
+  // 同一天同类型只保留一份方案，避免重复堆叠导致用户无从选择
+  if (type === 'supplement') {
+    await db.prepare(
+      "DELETE FROM nutrition_plans WHERE user_id = ? AND plan_date = ? AND content LIKE '【补剂方案】%'"
+    )
+      .bind(userId, planDate)
+      .run();
+  } else {
+    await db.prepare(
+      "DELETE FROM nutrition_plans WHERE user_id = ? AND plan_date = ? AND content NOT LIKE '【补剂方案】%'"
+    )
+      .bind(userId, planDate)
+      .run();
+  }
 
   const id = crypto.randomUUID();
   await db.prepare(
@@ -1141,6 +1420,19 @@ async function applyDailyLog(
   return true;
 }
 
+async function deleteDailyLogByDate(
+  db: D1Database,
+  userId: string,
+  rawDate: unknown,
+  contextText?: string
+): Promise<boolean> {
+  const logDate = inferRecordDate(rawDate, contextText || '');
+  const res = await db.prepare('DELETE FROM daily_logs WHERE user_id = ? AND log_date = ?')
+    .bind(userId, logDate)
+    .run();
+  return Boolean(res.meta?.changes);
+}
+
 export async function applyAutoWriteback(
   db: D1Database,
   userId: string,
@@ -1149,33 +1441,87 @@ export async function applyAutoWriteback(
 ): Promise<OrchestrateAutoWriteSummary> {
   const summary: OrchestrateAutoWriteSummary = {
     profile_updated: false,
+    user_updated: false,
     conditions_upserted: 0,
+    conditions_deleted: 0,
     training_goals_upserted: 0,
+    training_goals_deleted: 0,
     health_metrics_created: 0,
+    health_metrics_updated: 0,
+    health_metrics_deleted: 0,
     training_plan_created: false,
+    training_plan_deleted: false,
     nutrition_plan_created: false,
+    nutrition_plan_deleted: false,
     supplement_plan_created: false,
+    supplement_plan_deleted: false,
     diet_records_created: 0,
+    diet_records_deleted: 0,
     daily_log_upserted: false,
+    daily_log_deleted: false,
   };
 
   if (!extracted) return summary;
 
+  summary.user_updated = await applyUserPatch(db, userId, extracted.user);
   summary.profile_updated = await applyProfilePatch(db, userId, extracted.profile);
-  summary.conditions_upserted = await applyConditions(db, userId, extracted.conditions, extracted.conditions_mode);
-  summary.training_goals_upserted = await applyTrainingGoals(
-    db,
-    userId,
-    extracted.training_goals,
-    extracted.training_goals_mode
-  );
-  summary.health_metrics_created = await applyHealthMetrics(db, userId, extracted.health_metrics);
   const contextText = typeof options?.contextText === 'string' ? options.contextText : '';
 
+  // --- Conditions (伤病) ---
+  const conditionsMode = normalizeConditionsMode(extracted.conditions_mode) ?? 'upsert';
+  if (conditionsMode === 'clear_all') {
+    summary.conditions_deleted = await countRowsForUser(db, 'conditions', userId);
+    await applyConditions(db, userId, undefined, 'clear_all');
+  } else if (conditionsMode === 'replace_all') {
+    summary.conditions_deleted = await countRowsForUser(db, 'conditions', userId);
+    summary.conditions_upserted = await applyConditions(db, userId, extracted.conditions, 'replace_all');
+  } else {
+    summary.conditions_deleted = await deleteByIds(db, 'conditions', userId, extracted.conditions_delete_ids, 10);
+    summary.conditions_upserted = await applyConditions(db, userId, extracted.conditions, 'upsert');
+  }
+
+  // --- Training goals (训练目标) ---
+  const goalsMode = normalizeTrainingGoalsMode(extracted.training_goals_mode) ?? 'upsert';
+  if (goalsMode === 'clear_all') {
+    summary.training_goals_deleted = await countRowsForUser(db, 'training_goals', userId);
+    await applyTrainingGoals(db, userId, undefined, 'clear_all');
+  } else if (goalsMode === 'replace_all') {
+    summary.training_goals_deleted = await countRowsForUser(db, 'training_goals', userId);
+    summary.training_goals_upserted = await applyTrainingGoals(db, userId, extracted.training_goals, 'replace_all');
+  } else {
+    summary.training_goals_deleted = await deleteByIds(db, 'training_goals', userId, extracted.training_goals_delete_ids, 10);
+    summary.training_goals_upserted = await applyTrainingGoals(db, userId, extracted.training_goals, 'upsert');
+  }
+
+  // --- Health metrics (理化指标) ---
+  summary.health_metrics_updated = await applyHealthMetricUpdates(db, userId, extracted.health_metrics_update);
+  summary.health_metrics_deleted = await deleteByIds(db, 'health_metrics', userId, extracted.health_metrics_delete_ids, 10);
+  summary.health_metrics_created = await applyHealthMetrics(db, userId, extracted.health_metrics);
+
+  // --- Training plan (训练计划/记录) ---
+  if (extracted.training_plan_delete_date) {
+    summary.training_plan_deleted = await deleteTrainingPlanByDate(db, userId, extracted.training_plan_delete_date, contextText);
+  }
   summary.training_plan_created = await applyTrainingPlan(db, userId, extracted.training_plan, contextText);
+
+  // --- Nutrition plans (饮食/补剂方案) ---
+  if (extracted.nutrition_plan_delete_date) {
+    summary.nutrition_plan_deleted = await deleteNutritionPlanByDate(db, userId, extracted.nutrition_plan_delete_date, 'nutrition', contextText);
+  }
+  if (extracted.supplement_plan_delete_date) {
+    summary.supplement_plan_deleted = await deleteNutritionPlanByDate(db, userId, extracted.supplement_plan_delete_date, 'supplement', contextText);
+  }
   summary.nutrition_plan_created = await applyNutritionPlan(db, userId, extracted.nutrition_plan, 'nutrition');
   summary.supplement_plan_created = await applyNutritionPlan(db, userId, extracted.supplement_plan, 'supplement');
+
+  // --- Diet records (饮食记录) ---
+  summary.diet_records_deleted = await deleteDietRecords(db, userId, extracted.diet_records_delete, contextText);
   summary.diet_records_created = await applyDietRecords(db, userId, extracted.diet_records, contextText);
+
+  // --- Daily log (体重/睡眠) ---
+  if (extracted.daily_log_delete_date) {
+    summary.daily_log_deleted = await deleteDailyLogByDate(db, userId, extracted.daily_log_delete_date, contextText);
+  }
   summary.daily_log_upserted = await applyDailyLog(db, userId, extracted.daily_log);
 
   return summary;
@@ -1277,14 +1623,24 @@ export async function runAutoOrchestrate(params: OrchestrateParams): Promise<Orc
 
   let updateSummary: OrchestrateAutoWriteSummary = {
     profile_updated: false,
+    user_updated: false,
     conditions_upserted: 0,
+    conditions_deleted: 0,
     training_goals_upserted: 0,
+    training_goals_deleted: 0,
     health_metrics_created: 0,
+    health_metrics_updated: 0,
+    health_metrics_deleted: 0,
     training_plan_created: false,
+    training_plan_deleted: false,
     nutrition_plan_created: false,
+    nutrition_plan_deleted: false,
     supplement_plan_created: false,
+    supplement_plan_deleted: false,
     diet_records_created: 0,
+    diet_records_deleted: 0,
     daily_log_upserted: false,
+    daily_log_deleted: false,
   };
 
   if (autoWriteback) {

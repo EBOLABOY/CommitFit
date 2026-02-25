@@ -184,14 +184,24 @@ export interface OrchestrateChatRequest {
 
 export interface OrchestrateAutoWriteSummary {
   profile_updated: boolean;
+  user_updated?: boolean;
   conditions_upserted: number;
+  conditions_deleted?: number;
   training_goals_upserted: number;
+  training_goals_deleted?: number;
   health_metrics_created: number;
+  health_metrics_updated?: number;
+  health_metrics_deleted?: number;
   training_plan_created: boolean;
+  training_plan_deleted?: boolean;
   nutrition_plan_created: boolean;
+  nutrition_plan_deleted?: boolean;
   supplement_plan_created: boolean;
+  supplement_plan_deleted?: boolean;
   diet_records_created: number;
+  diet_records_deleted?: number;
   daily_log_upserted: boolean;
+  daily_log_deleted?: boolean;
 }
 
 // ============ SSE Events (Supervisor Multi-Agent) ============

@@ -7,6 +7,7 @@ import type { Bindings } from '../types';
 import { getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
 import { decideExecutionMode } from '../services/execution-mode';
 import { syncProfileToolSchema } from './sync-profile-tool';
+import { queryUserDataToolSchema } from './query-user-data-tool';
 import type {
   CustomBroadcast,
   RoutingBroadcast,
@@ -402,6 +403,177 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const writebackMode = writebackModeRaw.toLowerCase();
       const isLocalFirstWriteback = writebackMode !== 'remote';
 
+      const queryUserDataTool = tool({
+        description: [
+          '查询用户数据（只读）。用于回答用户关于其历史记录/当前数据的问题。',
+          '禁止返回或推断任何账户/密码敏感信息（如 password_hash、JWT_SECRET、LLM_API_KEY 等）。',
+          '返回结果请尽量简洁，必要时让用户缩小时间范围或指定条目。',
+        ].join('\n'),
+        inputSchema: queryUserDataToolSchema,
+        execute: async (args) => {
+          const truncate = (text: unknown, max = 2000): string | null => {
+            if (typeof text !== 'string') return null;
+            if (text.length <= max) return text;
+            return `${text.slice(0, max)}...(已截断)`;
+          };
+
+          const limitRaw = (args as Record<string, unknown>).limit;
+          const limit = typeof limitRaw === 'number' && Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.floor(limitRaw))) : 20;
+
+          switch (args.resource) {
+            case 'user': {
+              const user = await this.env.DB.prepare('SELECT id, email, nickname, avatar_key FROM users WHERE id = ?')
+                .bind(userId)
+                .first();
+              return { success: true, data: user };
+            }
+            case 'profile': {
+              const profile = await this.env.DB.prepare('SELECT * FROM user_profiles WHERE user_id = ?')
+                .bind(userId)
+                .first();
+              return { success: true, data: profile };
+            }
+            case 'conditions': {
+              const status = args.status && args.status !== 'all' ? args.status : null;
+              const sql = status
+                ? "SELECT * FROM conditions WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?"
+                : 'SELECT * FROM conditions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?';
+              const res = status
+                ? await this.env.DB.prepare(sql).bind(userId, status, limit).all()
+                : await this.env.DB.prepare(sql).bind(userId, limit).all();
+              return { success: true, data: res.results || [] };
+            }
+            case 'training_goals': {
+              const status = args.status && args.status !== 'all' ? args.status : null;
+              const sql = status
+                ? "SELECT * FROM training_goals WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?"
+                : 'SELECT * FROM training_goals WHERE user_id = ? ORDER BY created_at DESC LIMIT ?';
+              const res = status
+                ? await this.env.DB.prepare(sql).bind(userId, status, limit).all()
+                : await this.env.DB.prepare(sql).bind(userId, limit).all();
+              return { success: true, data: res.results || [] };
+            }
+            case 'health_metrics': {
+              const clauses: string[] = ['user_id = ?'];
+              const params: unknown[] = [userId];
+              if (args.metric_type) {
+                clauses.push('metric_type = ?');
+                params.push(args.metric_type);
+              }
+              if (args.date_from) {
+                clauses.push('recorded_at >= ?');
+                params.push(args.date_from);
+              }
+              if (args.date_to) {
+                clauses.push('recorded_at <= ?');
+                params.push(args.date_to);
+              }
+              params.push(limit);
+              const res = await this.env.DB.prepare(
+                `SELECT * FROM health_metrics WHERE ${clauses.join(' AND ')} ORDER BY recorded_at DESC, created_at DESC LIMIT ?`
+              ).bind(...params).all();
+              return { success: true, data: res.results || [] };
+            }
+            case 'training_plans': {
+              const l = Math.min(limit, 30);
+              const clauses: string[] = ['user_id = ?'];
+              const params: unknown[] = [userId];
+              if (args.date_from) {
+                clauses.push('plan_date >= ?');
+                params.push(args.date_from);
+              }
+              if (args.date_to) {
+                clauses.push('plan_date <= ?');
+                params.push(args.date_to);
+              }
+              params.push(l);
+              const res = await this.env.DB.prepare(
+                `SELECT * FROM training_plans WHERE ${clauses.join(' AND ')} ORDER BY plan_date DESC LIMIT ?`
+              ).bind(...params).all();
+              const rows = (res.results || []).map((row) => {
+                const r = row as Record<string, unknown>;
+                if (r.content) r.content = truncate(r.content, 2400);
+                if (r.notes) r.notes = truncate(r.notes, 800);
+                return r;
+              });
+              return { success: true, data: rows };
+            }
+            case 'nutrition_plans': {
+              const l = Math.min(limit, 30);
+              const clauses: string[] = ['user_id = ?'];
+              const params: unknown[] = [userId];
+              if (args.date_from) {
+                clauses.push('plan_date >= ?');
+                params.push(args.date_from);
+              }
+              if (args.date_to) {
+                clauses.push('plan_date <= ?');
+                params.push(args.date_to);
+              }
+              if (args.plan_kind === 'supplement') {
+                clauses.push("content LIKE '【补剂方案】%'");
+              } else if (args.plan_kind === 'nutrition') {
+                clauses.push("content NOT LIKE '【补剂方案】%'");
+              }
+              params.push(l);
+              const res = await this.env.DB.prepare(
+                `SELECT * FROM nutrition_plans WHERE ${clauses.join(' AND ')} ORDER BY plan_date DESC LIMIT ?`
+              ).bind(...params).all();
+              const rows = (res.results || []).map((row) => {
+                const r = row as Record<string, unknown>;
+                if (r.content) r.content = truncate(r.content, 2400);
+                return r;
+              });
+              return { success: true, data: rows };
+            }
+            case 'diet_records': {
+              const clauses: string[] = ['user_id = ?'];
+              const params: unknown[] = [userId];
+              if (args.meal_type) {
+                clauses.push('meal_type = ?');
+                params.push(args.meal_type);
+              }
+              if (args.date_from) {
+                clauses.push('record_date >= ?');
+                params.push(args.date_from);
+              }
+              if (args.date_to) {
+                clauses.push('record_date <= ?');
+                params.push(args.date_to);
+              }
+              params.push(limit);
+              const res = await this.env.DB.prepare(
+                `SELECT * FROM diet_records WHERE ${clauses.join(' AND ')} ORDER BY record_date DESC, created_at DESC LIMIT ?`
+              ).bind(...params).all();
+              const rows = (res.results || []).map((row) => {
+                const r = row as Record<string, unknown>;
+                if (r.food_description) r.food_description = truncate(r.food_description, 1200);
+                if (r.foods_json) r.foods_json = truncate(r.foods_json, 2400);
+                return r;
+              });
+              return { success: true, data: rows };
+            }
+            case 'daily_logs': {
+              const clauses: string[] = ['user_id = ?'];
+              const params: unknown[] = [userId];
+              if (args.date_from) {
+                clauses.push('log_date >= ?');
+                params.push(args.date_from);
+              }
+              if (args.date_to) {
+                clauses.push('log_date <= ?');
+                params.push(args.date_to);
+              }
+              params.push(limit);
+              const res = await this.env.DB.prepare(
+                `SELECT * FROM daily_logs WHERE ${clauses.join(' AND ')} ORDER BY log_date DESC LIMIT ?`
+              ).bind(...params).all();
+              return { success: true, data: res.results || [] };
+            }
+          }
+        },
+      });
+
       const syncProfileTool = tool({
         description: [
           '当用户在对话中明确给出可写回的数据/操作（身体档案、伤病记录、训练目标、训练计划、饮食记录、日志等）时调用，用于把信息同步到用户数据。',
@@ -409,6 +581,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '清空伤病记录：设置 conditions_mode="clear_all"，不要传 conditions。',
           '清空训练目标：设置 training_goals_mode="clear_all"，不要编造 training_goals。',
           '先清空再写入：分别使用 *_mode="replace_all" 并提供对应列表。',
+          '按 id 删除指定条目：使用 *_delete_ids（例如 conditions_delete_ids、training_goals_delete_ids、health_metrics_delete_ids）。',
+          '删除某天训练计划：设置 training_plan_delete_date="YYYY-MM-DD"（也可以用“今天/明天/本周”让系统推断）。',
+          '删除饮食记录：使用 diet_records_delete（优先 id；否则 meal_type + record_date）。',
+          '禁止操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
           '请在回复完用户问题后再调用。',
         ].join('\n'),
         inputSchema: syncProfileToolSchema,
@@ -460,8 +636,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         system: systemPrompt,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: await convertToModelMessages(trimmedConversation as any),
-        tools: allowProfileSync ? { sync_profile: syncProfileTool } : {},
-        stopWhen: allowProfileSync ? stepCountIs(2) : stepCountIs(1),
+        tools: allowProfileSync
+          ? { query_user_data: queryUserDataTool, sync_profile: syncProfileTool }
+          : { query_user_data: queryUserDataTool },
+        stopWhen: allowProfileSync ? stepCountIs(3) : stepCountIs(2),
         onFinish: async (event) => {
           const text = event.text;
 
