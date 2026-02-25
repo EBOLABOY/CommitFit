@@ -18,8 +18,6 @@ import {
   saveOrchestrateAssistantMessage,
   saveOrchestrateUserMessage,
   applyAutoWriteback,
-  resolveWritebackPayload,
-  hasWritebackChanges,
   recordWritebackAudit,
 } from '../services/orchestrator';
 import { getUserContext, buildContextForRole, estimateTokens } from '../services/context';
@@ -458,33 +456,6 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
             await saveOrchestrateAssistantMessage(this.env.DB, userId, text, metadata);
           } catch { /* ignore save failure */ }
-
-          // c. Fallback: if LLM did not call sync_profile, try rule-based writeback silently
-          if (allowProfileSync && !toolExecuted) {
-            try {
-              const { payload: writebackPayload } = await resolveWritebackPayload(
-                this.env,
-                userText,
-                history,
-                text,
-              );
-              if (writebackPayload) {
-                const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
-                  contextText: `${userText}\n${text}`,
-                });
-                if (hasWritebackChanges(summary)) {
-                  const syncBroadcast: ProfileSyncResultBroadcast = {
-                    type: 'profile_sync_result',
-                    summary,
-                  };
-                  this.broadcastCustom(syncBroadcast);
-                  try {
-                    await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
-                  } catch { /* ignore */ }
-                }
-              }
-            } catch { /* silent fallback writeback failure */ }
-          }
 
           // Notify AIChatAgent that stream is done (type assertion needed due to ToolSet variance)
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
