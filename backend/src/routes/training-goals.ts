@@ -8,6 +8,7 @@ export const trainingGoalRoutes = new Hono<{ Bindings: Bindings; Variables: Vari
 trainingGoalRoutes.use('*', authMiddleware);
 
 const STATUS_VALUES = ['active', 'completed'] as const;
+const DESCRIPTION_MAX_LENGTH = 4000;
 
 // GET /api/training-goals
 trainingGoalRoutes.get('/', async (c) => {
@@ -48,8 +49,8 @@ trainingGoalRoutes.post('/', async (c) => {
   if (!isNonEmptyString(name) || name.length > 100) {
     return c.json({ success: false, error: 'name 不能为空且长度不能超过 100 字符' }, 400);
   }
-  if (description !== undefined && description !== null && !isStringMaxLength(description, 500)) {
-    return c.json({ success: false, error: 'description 长度不能超过 500 字符' }, 400);
+  if (description !== undefined && description !== null && !isStringMaxLength(description, DESCRIPTION_MAX_LENGTH)) {
+    return c.json({ success: false, error: `description 长度不能超过 ${DESCRIPTION_MAX_LENGTH} 字符` }, 400);
   }
 
   const id = crypto.randomUUID();
@@ -94,8 +95,8 @@ trainingGoalRoutes.put('/:id', async (c) => {
   }
 
   if (body.description !== undefined) {
-    if (body.description !== null && !isStringMaxLength(body.description, 500)) {
-      return c.json({ success: false, error: 'description 长度不能超过 500 字符' }, 400);
+    if (body.description !== null && !isStringMaxLength(body.description, DESCRIPTION_MAX_LENGTH)) {
+      return c.json({ success: false, error: `description 长度不能超过 ${DESCRIPTION_MAX_LENGTH} 字符` }, 400);
     }
     fields.push('description = ?');
     values.push(body.description);

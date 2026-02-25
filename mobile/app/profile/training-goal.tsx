@@ -96,7 +96,7 @@ export default function TrainingGoalScreen() {
 
     const results = await Promise.allSettled(
       parsed.goals.map((g) =>
-        api.createTrainingGoal({ name: String(g.name).slice(0, 100), description: g.description ? String(g.description).slice(0, 500) : undefined })
+        api.createTrainingGoal({ name: String(g.name).slice(0, 100), description: g.description ? String(g.description).slice(0, 4000) : undefined })
       )
     );
     const succeeded = results.filter((r) => r.status === 'fulfilled').length;

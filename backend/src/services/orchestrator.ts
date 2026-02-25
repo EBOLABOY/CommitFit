@@ -543,6 +543,9 @@ export async function extractWritebackPayload(
     '你是结构化信息提取器。根据输入内容抽取可写回数据。',
     '仅在信息明确时填写；不明确请填 null 或空数组；禁止臆造。',
     '当用户明确要求清空训练目标时，设置 training_goals_mode="clear_all"；若是“先清空再设置新目标”，设置 training_goals_mode="replace_all" 并填充 training_goals。',
+    '训练目标必须从【用户最新问题/近期对话】中抽取，不要把【最终答复】里的确认语或客套话写入 training_goals。',
+    '当用户提供多个训练目标（例如 1./2./3. 分段标题），请将每一段写成一个 training_goals 元素：name=标题，description=该段完整内容（可多行）。',
+    '训练计划（training_plan.content）通常来自【最终答复】中的计划正文。',
     '必须只输出 JSON，不要 markdown，不要解释。',
     'JSON 模板：',
     '{"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"nutrition_plan":{"content":"","plan_date":null},"supplement_plan":{"content":"","plan_date":null},"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null}}',
@@ -589,8 +592,8 @@ function parseNumberByPatterns(source: string, patterns: RegExp[], min: number, 
 
 function parseTrainingGoalName(source: string): string | null {
   const patterns = [
-    /训练目标(?:是|为|:|：)?\s*([^\n。；;，,]{2,80})/i,
-    /目标(?:是|为|:|：)?\s*([^\n。；;，,]{2,80})/i,
+    /训练目标(?:是|为|:|：)\s*([^\n。；;，,]{2,80})/i,
+    /目标(?:是|为|:|：)\s*([^\n。；;，,]{2,80})/i,
   ];
   for (const pattern of patterns) {
     const match = source.match(pattern);
@@ -602,6 +605,56 @@ function parseTrainingGoalName(source: string): string | null {
     return normalized;
   }
   return null;
+}
+
+function stripZeroWidth(text: string): string {
+  return text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+}
+
+function extractNumberedTrainingGoals(message: string): ExtractedTrainingGoal[] | null {
+  const cleaned = stripZeroWidth(message).replace(/\r\n/g, '\n').trim();
+  if (!cleaned) return null;
+
+  // 形如：
+  // 1. 终极形态 (Ultimate Form)
+  // 2）核心表现与安全红线
+  const headerPattern = /^\s*(\d{1,2})\s*[.、)）．]\s*(.+?)\s*$/;
+  const lines = cleaned.split('\n');
+
+  const sections: Array<{ title: string; bodyLines: string[] }> = [];
+  let current: { title: string; bodyLines: string[] } | null = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const m = line.match(headerPattern);
+    if (m && m[2]) {
+      if (current) sections.push(current);
+      current = { title: m[2], bodyLines: [] };
+      continue;
+    }
+
+    if (current) current.bodyLines.push(rawLine);
+  }
+
+  if (current) sections.push(current);
+  if (sections.length < 2) return null;
+
+  const goals: ExtractedTrainingGoal[] = [];
+  for (const section of sections.slice(0, 5)) {
+    const name = normalizeString(section.title, 100);
+    if (!name) continue;
+
+    const body = section.bodyLines.join('\n').trim();
+    const description = body ? (normalizeString(body, 4000) ?? null) : null;
+
+    goals.push({
+      name,
+      description,
+      status: 'active',
+    });
+  }
+
+  return goals.length > 0 ? goals : null;
 }
 
 function hasClearTrainingGoalsIntent(message: string): boolean {
@@ -757,19 +810,23 @@ function mergeWritebackPayload(
 }
 
 function extractWritebackPayloadByRules(message: string, answer: string): ExtractedWritebackPayload | null {
-  const source = `${message}\n${answer}`;
+  // 规则抽取必须以用户 message 为主，避免把助手确认语写入目标/日志等数据。
+  // 训练计划正文则来自 answer（这是助手生成的内容）。
+  const source = stripZeroWidth(message);
   const payload: ExtractedWritebackPayload = {};
   const shouldClearGoals = hasClearTrainingGoalsIntent(message);
-  if (shouldClearGoals) {
-    payload.training_goals_mode = 'clear_all';
-  }
 
-  const goalName = parseTrainingGoalName(source);
-  if (goalName) {
-    payload.profile = { training_goal: goalName };
-    payload.training_goals = [{ name: goalName, description: null, status: 'active' }];
-    if (payload.training_goals_mode === 'clear_all') {
-      payload.training_goals_mode = 'replace_all';
+  const numberedGoals = extractNumberedTrainingGoals(source);
+  if (numberedGoals && numberedGoals.length > 0) {
+    payload.training_goals = numberedGoals;
+    if (shouldClearGoals) payload.training_goals_mode = 'replace_all';
+  } else {
+    if (shouldClearGoals) payload.training_goals_mode = 'clear_all';
+
+    const goalName = parseTrainingGoalName(source);
+    if (goalName) {
+      payload.training_goals = [{ name: goalName, description: null, status: 'active' }];
+      if (payload.training_goals_mode === 'clear_all') payload.training_goals_mode = 'replace_all';
     }
   }
 
@@ -872,9 +929,17 @@ export async function resolveWritebackPayload(
   const rulePayload = extractWritebackPayloadByRules(message, answer);
   let mergedPayload = mergeWritebackPayload(llmPayload, rulePayload);
 
+  // 若用户提供了明确的 1/2/3 分段目标，则以规则解析结果为准，避免 LLM 误把“确认语”写入目标。
+  const numberedGoals = extractNumberedTrainingGoals(message);
+  if (numberedGoals && numberedGoals.length > 0) {
+    mergedPayload = mergedPayload ?? {};
+    mergedPayload.training_goals = numberedGoals;
+    if (!mergedPayload.training_goals_mode) mergedPayload.training_goals_mode = 'upsert';
+  }
+
   const clearIntent = hasClearTrainingGoalsIntent(message);
   const explicitGoalInMessage = parseTrainingGoalName(message);
-  if (clearIntent && !explicitGoalInMessage) {
+  if (clearIntent && !explicitGoalInMessage && (!numberedGoals || numberedGoals.length === 0)) {
     mergedPayload = mergedPayload ?? {};
     mergedPayload.training_goals_mode = 'clear_all';
     delete mergedPayload.training_goals;
@@ -1005,7 +1070,7 @@ async function applyTrainingGoals(
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    const description = item?.description == null ? null : normalizeString(item.description, 500);
+    const description = item?.description == null ? null : normalizeString(item.description, 4000);
     const status = typeof item?.status === 'string' && VALID_TRAINING_GOAL_STATUS.includes(item.status as TrainingGoalStatus)
       ? (item.status as TrainingGoalStatus)
       : null;

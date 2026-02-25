@@ -19,8 +19,8 @@ export const syncProfileToolSchema = z.object({
     status: z.enum(['active', 'recovered']).optional().default('active'),
   })).max(5).optional(),
   training_goals: z.array(z.object({
-    name: z.string(),
-    description: z.string().optional(),
+    name: z.string().max(100),
+    description: z.string().max(4000).optional(),
     status: z.enum(['active', 'completed']).optional().default('active'),
   })).max(5).optional(),
   training_goals_mode: trainingGoalsModeSchema.optional().describe('训练目标写入模式：upsert=合并更新；replace_all=先清空再写入传入列表；clear_all=仅清空'),
