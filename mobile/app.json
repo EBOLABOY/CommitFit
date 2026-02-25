@@ -27,7 +27,8 @@
           "photosPermission": "允许练了码访问你的相册以发送体检报告等图片",
           "cameraPermission": "允许练了码使用相机拍摄体检报告等图片"
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ]
   }
 }
