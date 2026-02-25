@@ -159,12 +159,20 @@ export function useAgentChat(sessionId = 'default') {
   const [writebackSummary, setWritebackSummary] = useState<OrchestrateAutoWriteSummary | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingToolApproval | null>(null);
 
+  // 幂等处理：同一个 toolCallId 可能在断线重连/流恢复时被重复推送，避免重复弹窗。
+  const toolApprovalDecisionRef = useRef<Map<string, boolean>>(new Map());
+  const pendingApprovalRef = useRef<PendingToolApproval | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const userIdRef = useRef<string | null>(null);
   const currentAssistantIdRef = useRef<string | null>(null);
   const routingInfoRef = useRef<SSERoutingEvent | null>(null);
   const supplementsRef = useRef<SSESupplementEvent[]>([]);
+
+  useEffect(() => {
+    pendingApprovalRef.current = pendingApproval;
+  }, [pendingApproval]);
 
   // --- Connect ---
 
@@ -450,8 +458,33 @@ export function useAgentChat(sessionId = 'default') {
       }
       case 'tool-approval-request': {
         // Tool needs human approval
-        const toolCallId = chunk.toolCallId as string;
-        const toolName = chunk.toolName as string;
+        const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
+        const toolName = typeof chunk.toolName === 'string' ? chunk.toolName : '';
+        if (!toolCallId || !toolName) break;
+
+        // 若已对该 toolCallId 做出过决定（同意/拒绝），直接重发决定，避免重复弹窗。
+        const decided = toolApprovalDecisionRef.current.get(toolCallId);
+        if (typeof decided === 'boolean') {
+          const ws = wsRef.current;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+              ws.send(JSON.stringify({
+                type: 'cf_agent_tool_approval',
+                toolCallId,
+                approved: decided,
+                autoContinue: true,
+              }));
+            } catch {
+              // ignore resend failure
+            }
+          }
+          break;
+        }
+
+        // 已经在弹同一个请求时，不要重复 setState（避免 UI 反复闪烁/多次弹窗）。
+        const currentPending = pendingApprovalRef.current;
+        if (currentPending && currentPending.toolCallId === toolCallId) break;
+
         const input = (chunk.input || {}) as Record<string, unknown>;
         const summaryText = (input.summary_text as string) || '确认同步以下数据？';
         setPendingApproval({ toolCallId, toolName, args: input, summaryText });
@@ -589,6 +622,12 @@ export function useAgentChat(sessionId = 'default') {
   const approveToolCall = useCallback((toolCallId: string) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    toolApprovalDecisionRef.current.set(toolCallId, true);
+    // 防止 Map 无限增长（仅保留最近一段时间内的决定）
+    if (toolApprovalDecisionRef.current.size > 200) {
+      const firstKey = toolApprovalDecisionRef.current.keys().next().value as string | undefined;
+      if (firstKey) toolApprovalDecisionRef.current.delete(firstKey);
+    }
     ws.send(JSON.stringify({
       type: 'cf_agent_tool_approval',
       toolCallId,
@@ -601,6 +640,11 @@ export function useAgentChat(sessionId = 'default') {
   const rejectToolCall = useCallback((toolCallId: string) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    toolApprovalDecisionRef.current.set(toolCallId, false);
+    if (toolApprovalDecisionRef.current.size > 200) {
+      const firstKey = toolApprovalDecisionRef.current.keys().next().value as string | undefined;
+      if (firstKey) toolApprovalDecisionRef.current.delete(firstKey);
+    }
     ws.send(JSON.stringify({
       type: 'cf_agent_tool_approval',
       toolCallId,
