@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const mealTypeSchema = z.enum(['breakfast', 'lunch', 'dinner', 'snack']);
+const conditionsModeSchema = z.enum(['upsert', 'replace_all', 'clear_all']);
 const trainingGoalsModeSchema = z.enum(['upsert', 'replace_all', 'clear_all']);
 
 export const syncProfileToolSchema = z.object({
@@ -18,6 +19,7 @@ export const syncProfileToolSchema = z.object({
     severity: z.enum(['mild', 'moderate', 'severe']).optional(),
     status: z.enum(['active', 'recovered']).optional().default('active'),
   })).max(5).optional(),
+  conditions_mode: conditionsModeSchema.optional().describe('伤病记录写入模式：upsert=合并更新；replace_all=先清空再写入传入列表；clear_all=仅清空'),
   training_goals: z.array(z.object({
     name: z.string().max(100),
     description: z.string().max(4000).optional(),

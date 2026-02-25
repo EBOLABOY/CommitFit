@@ -57,6 +57,7 @@ type Gender = 'male' | 'female';
 type Severity = 'mild' | 'moderate' | 'severe';
 type ConditionStatus = 'active' | 'recovered';
 type TrainingGoalStatus = 'active' | 'completed';
+type ConditionsWriteMode = 'upsert' | 'replace_all' | 'clear_all';
 type TrainingGoalsWriteMode = 'upsert' | 'replace_all' | 'clear_all';
 type MetricType = 'testosterone' | 'blood_pressure' | 'blood_lipids' | 'blood_sugar' | 'heart_rate' | 'body_fat' | 'other';
 type MealType = 'breakfast' | 'lunch' | 'dinner' | 'snack';
@@ -126,6 +127,7 @@ interface ExtractedDailyLog {
 interface ExtractedWritebackPayload {
   profile?: ExtractedProfilePatch;
   conditions?: ExtractedCondition[];
+  conditions_mode?: ConditionsWriteMode | null;
   training_goals?: ExtractedTrainingGoal[];
   training_goals_mode?: TrainingGoalsWriteMode | null;
   health_metrics?: ExtractedMetric[];
@@ -181,6 +183,7 @@ const VALID_GENDER: Gender[] = ['male', 'female'];
 const VALID_SEVERITY: Severity[] = ['mild', 'moderate', 'severe'];
 const VALID_STATUS: ConditionStatus[] = ['active', 'recovered'];
 const VALID_TRAINING_GOAL_STATUS: TrainingGoalStatus[] = ['active', 'completed'];
+const VALID_CONDITION_WRITE_MODES: ConditionsWriteMode[] = ['upsert', 'replace_all', 'clear_all'];
 const VALID_TRAINING_GOAL_WRITE_MODES: TrainingGoalsWriteMode[] = ['upsert', 'replace_all', 'clear_all'];
 const VALID_METRIC_TYPES: MetricType[] = ['testosterone', 'blood_pressure', 'blood_lipids', 'blood_sugar', 'heart_rate', 'body_fat', 'other'];
 const VALID_MEAL_TYPES: MealType[] = ['breakfast', 'lunch', 'dinner', 'snack'];
@@ -263,6 +266,13 @@ function normalizeTrainingGoalsMode(value: unknown): TrainingGoalsWriteMode | nu
   if (typeof value !== 'string') return null;
   return VALID_TRAINING_GOAL_WRITE_MODES.includes(value as TrainingGoalsWriteMode)
     ? (value as TrainingGoalsWriteMode)
+    : null;
+}
+
+function normalizeConditionsMode(value: unknown): ConditionsWriteMode | null {
+  if (typeof value !== 'string') return null;
+  return VALID_CONDITION_WRITE_MODES.includes(value as ConditionsWriteMode)
+    ? (value as ConditionsWriteMode)
     : null;
 }
 
@@ -542,13 +552,14 @@ export async function extractWritebackPayload(
   const prompt = [
     '你是结构化信息提取器。根据输入内容抽取可写回数据。',
     '仅在信息明确时填写；不明确请填 null 或空数组；禁止臆造。',
+    '当用户明确要求清空伤病记录时，设置 conditions_mode="clear_all"；若是“先清空再设置新伤病记录”，设置 conditions_mode="replace_all" 并填充 conditions。',
     '当用户明确要求清空训练目标时，设置 training_goals_mode="clear_all"；若是“先清空再设置新目标”，设置 training_goals_mode="replace_all" 并填充 training_goals。',
     '训练目标必须从【用户最新问题/近期对话】中抽取，不要把【最终答复】里的确认语或客套话写入 training_goals。',
     '当用户提供多个训练目标（例如 1./2./3. 分段标题），请将每一段写成一个 training_goals 元素：name=标题，description=该段完整内容（可多行）。',
     '训练计划（training_plan.content）通常来自【最终答复】中的计划正文。',
     '必须只输出 JSON，不要 markdown，不要解释。',
     'JSON 模板：',
-    '{"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"nutrition_plan":{"content":"","plan_date":null},"supplement_plan":{"content":"","plan_date":null},"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null}}',
+    '{"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"conditions_mode":"upsert","training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"nutrition_plan":{"content":"","plan_date":null},"supplement_plan":{"content":"","plan_date":null},"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null}}',
     '',
     `用户最新问题：${message}`,
     historyText ? `近期对话：\n${historyText}` : '近期对话：无',
@@ -612,10 +623,16 @@ function hasMeaningfulObjectValue(value: unknown): boolean {
 function normalizeWritebackPayload(payload: ExtractedWritebackPayload | null | undefined): ExtractedWritebackPayload | null {
   if (!payload) return null;
   const normalized: ExtractedWritebackPayload = {};
+  const conditionsMode = normalizeConditionsMode(payload.conditions_mode);
   const trainingGoalsMode = normalizeTrainingGoalsMode(payload.training_goals_mode);
 
   if (hasMeaningfulObjectValue(payload.profile)) normalized.profile = payload.profile;
-  if (Array.isArray(payload.conditions) && payload.conditions.length > 0) normalized.conditions = payload.conditions;
+  if (Array.isArray(payload.conditions) && payload.conditions.length > 0) {
+    normalized.conditions = payload.conditions;
+    normalized.conditions_mode = conditionsMode ?? 'upsert';
+  } else if (conditionsMode) {
+    normalized.conditions_mode = conditionsMode;
+  }
   if (Array.isArray(payload.training_goals) && payload.training_goals.length > 0) {
     normalized.training_goals = payload.training_goals;
     normalized.training_goals_mode = trainingGoalsMode ?? 'upsert';
@@ -718,44 +735,91 @@ async function applyProfilePatch(db: D1Database, userId: string, patch: Extracte
   return true;
 }
 
-async function applyConditions(db: D1Database, userId: string, rawConditions: ExtractedCondition[] | undefined): Promise<number> {
-  if (!Array.isArray(rawConditions) || rawConditions.length === 0) return 0;
-  const seen = new Set<string>();
-  let upserted = 0;
+async function applyConditions(
+  db: D1Database,
+  userId: string,
+  rawConditions: ExtractedCondition[] | undefined,
+  mode: ConditionsWriteMode | null | undefined
+): Promise<number> {
+  const normalizedMode: ConditionsWriteMode = normalizeConditionsMode(mode) ?? 'upsert';
 
-  for (const item of rawConditions.slice(0, 5)) {
+  const existingCountRow = await db.prepare(
+    'SELECT COUNT(1) as total FROM conditions WHERE user_id = ?'
+  ).bind(userId).first<{ total: number | string | null }>();
+  const existingCount = Number(existingCountRow?.total ?? 0);
+
+  if (normalizedMode === 'clear_all') {
+    if (existingCount <= 0) return 0;
+    await db.prepare('DELETE FROM conditions WHERE user_id = ?').bind(userId).run();
+    return existingCount;
+  }
+
+  const seen = new Set<string>();
+  const candidates: Array<{
+    name: string;
+    dedupeKey: string;
+    description: string | null;
+    severity: Severity | null;
+    status: ConditionStatus;
+  }> = [];
+
+  for (const item of (Array.isArray(rawConditions) ? rawConditions : []).slice(0, 5)) {
     const name = normalizeString(item?.name, 100);
     if (!name) continue;
-    const dedupeKey = name.toLowerCase();
+    const dedupeKey = name.trim().toLowerCase();
+    if (!dedupeKey) continue;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
     const description = item?.description == null ? null : normalizeString(item.description, 500);
     const severity = typeof item?.severity === 'string' && VALID_SEVERITY.includes(item.severity as Severity)
-      ? item.severity
+      ? (item.severity as Severity)
       : null;
     const status = typeof item?.status === 'string' && VALID_STATUS.includes(item.status as ConditionStatus)
-      ? item.status
+      ? (item.status as ConditionStatus)
       : 'active';
 
+    candidates.push({ name, dedupeKey, description, severity, status });
+  }
+
+  if (normalizedMode === 'replace_all') {
+    const statements = [db.prepare('DELETE FROM conditions WHERE user_id = ?').bind(userId)];
+    for (const item of candidates) {
+      const id = crypto.randomUUID();
+      statements.push(
+        db.prepare(
+          'INSERT INTO conditions (id, user_id, name, description, severity, status) VALUES (?, ?, ?, ?, ?, ?)'
+        ).bind(id, userId, item.name, item.description, item.severity, item.status)
+      );
+    }
+    await db.batch(statements);
+    if (candidates.length > 0) return candidates.length;
+    return existingCount;
+  }
+
+  // upsert
+  if (candidates.length === 0) return 0;
+  let upserted = 0;
+
+  for (const item of candidates) {
     const existing = await db.prepare(
       'SELECT id FROM conditions WHERE user_id = ? AND lower(name) = lower(?) LIMIT 1'
     )
-      .bind(userId, name)
+      .bind(userId, item.name)
       .first<{ id: string }>();
 
     if (existing?.id) {
       await db.prepare(
         'UPDATE conditions SET description = ?, severity = ?, status = ? WHERE id = ? AND user_id = ?'
       )
-        .bind(description, severity, status, existing.id, userId)
+        .bind(item.description, item.severity, item.status, existing.id, userId)
         .run();
     } else {
       const id = crypto.randomUUID();
       await db.prepare(
         'INSERT INTO conditions (id, user_id, name, description, severity, status) VALUES (?, ?, ?, ?, ?, ?)'
       )
-        .bind(id, userId, name, description, severity, status)
+        .bind(id, userId, item.name, item.description, item.severity, item.status)
         .run();
     }
 
@@ -1098,7 +1162,7 @@ export async function applyAutoWriteback(
   if (!extracted) return summary;
 
   summary.profile_updated = await applyProfilePatch(db, userId, extracted.profile);
-  summary.conditions_upserted = await applyConditions(db, userId, extracted.conditions);
+  summary.conditions_upserted = await applyConditions(db, userId, extracted.conditions, extracted.conditions_mode);
   summary.training_goals_upserted = await applyTrainingGoals(
     db,
     userId,
