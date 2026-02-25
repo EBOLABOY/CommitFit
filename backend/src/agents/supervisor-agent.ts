@@ -1,13 +1,13 @@
 import { AIChatAgent, type OnChatMessageOptions } from '@cloudflare/ai-chat';
-import { streamText, tool, convertToModelMessages, stepCountIs, type StreamTextOnFinishCallback, type ToolSet } from 'ai';
+import { streamText, generateText, tool, convertToModelMessages, stepCountIs, type StreamTextOnFinishCallback, type ToolSet } from 'ai';
 import type { Connection, ConnectionContext } from 'agents';
 import { jwtVerify } from 'jose';
 import type { AIRole } from '../../../shared/types';
 import type { Bindings } from '../types';
 import { getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
-import { decideExecutionMode } from '../services/execution-mode';
 import { syncProfileToolSchema } from './sync-profile-tool';
 import { queryUserDataToolSchema } from './query-user-data-tool';
+import { delegateGenerateToolSchema } from './delegate-generate-tool';
 import type {
   CustomBroadcast,
   RoutingBroadcast,
@@ -373,7 +373,18 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         };
       }
       const contextStr = buildContextForRole(activeRole, userContext);
-      const systemPrompt = SYSTEM_PROMPTS[activeRole] + '\n\n' + contextStr;
+      const architectureGuidanceLines: string[] = [
+        '架构约束（重要）：',
+        '1) 你是主助理，始终使用主模型进行对话与流式输出。',
+        '2) 当用户要求【生成/制定/安排】训练计划、饮食方案、补剂方案，或进行图片识别/分析时：必须先调用 delegate_generate 获取内容，再基于返回内容组织最终答复。',
+        '3) 当用户要求对数据进行增删改查时：可以先调用 query_user_data（只读）拿到 id，再用 sync_profile 生成写回草稿（Local-First）。',
+        '4) 写回必须来自用户原话/对话事实，禁止把“好的/已记录/明白了”等客套话写入任何字段。清空请使用 *_mode=\"clear_all\"。',
+        '5) 严禁操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
+      ];
+      if (hasImageInput && userImageUrl) {
+        architectureGuidanceLines.push(`本次输入包含图片 URL：${userImageUrl}`);
+      }
+      const systemPrompt = SYSTEM_PROMPTS[activeRole] + '\n\n' + contextStr + '\n\n' + architectureGuidanceLines.join('\n');
       const systemPromptTokens = estimateTokens(systemPrompt);
       const historyTokenBudget = Math.max(
         MIN_HISTORY_TOKEN_BUDGET,
@@ -387,17 +398,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       this.broadcastCustom({ type: 'status', message: `正在呼叫【${ROLE_NAMES[activeRole]}】...` });
 
       // 6. Stream response via AI SDK
-      this.broadcastCustom({ type: 'status', message: '主链路正在判定任务复杂度...' });
-      const executionDecision = await decideExecutionMode(this.env, userText, hasImageInput);
-      const useRoleModel = executionDecision.mode === 'role';
-      const model = useRoleModel ? getRoleLLMModel(this.env) : getMainLLMModel(this.env);
-      const modelAlias = useRoleModel ? 'LLM1' : 'LLM';
-      this.broadcastCustom({
-        type: 'status',
-        message: useRoleModel
-          ? `复杂任务：已切换深度模型处理（${executionDecision.reason}）`
-          : `简单任务：主模型快速处理（${executionDecision.reason}）`,
-      });
+      const model = getMainLLMModel(this.env);
+      const modelAlias = 'LLM';
+      this.broadcastCustom({ type: 'status', message: '主模型流式处理中（生成/分析类任务将委托深度生成器）...' });
 
       const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
       const writebackMode = writebackModeRaw.toLowerCase();
@@ -574,6 +577,128 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         },
       });
 
+      const delegateGenerateTool = tool({
+        description: [
+          '委托深度生成器（LLM1）。用于训练计划/饮食方案/补剂方案的生成，以及图片识别/分析等“长文本/复杂生成”任务。',
+          '返回内容必须是“可直接保存/粘贴”的正文，不要包含任何客套话、确认语、免责声明，也不要提及工具/模型/调用过程。',
+          '当用户只是解释、问答、常规增删改查时，不要调用此工具。',
+        ].join('\n'),
+        inputSchema: delegateGenerateToolSchema,
+        execute: async (args) => {
+          try {
+            const kind = args.kind;
+            const roleRaw = (args as Record<string, unknown>).role;
+            const delegateRole = isValidPreferredRole(roleRaw) ? roleRaw : activeRole;
+            const planDateHint = typeof (args as Record<string, unknown>).plan_date === 'string'
+              ? ((args as Record<string, unknown>).plan_date as string)
+              : null;
+            const imageUrlRaw = typeof (args as Record<string, unknown>).image_url === 'string'
+              ? ((args as Record<string, unknown>).image_url as string)
+              : null;
+
+            const kindLabel =
+              kind === 'training_plan'
+                ? '训练计划'
+                : kind === 'nutrition_plan'
+                  ? '饮食方案'
+                  : kind === 'supplement_plan'
+                    ? '补剂方案'
+                    : '分析';
+            this.broadcastCustom({ type: 'status', message: `正在委托深度生成器：${kindLabel}...` });
+
+            const delegateContext = buildContextForRole(delegateRole, userContext);
+            const delegateSystem = [
+              SYSTEM_PROMPTS[delegateRole],
+              delegateContext,
+              [
+                '你是一个被主助理调用的“深度生成器”（工具执行）。',
+                '只输出最终内容本身，不要输出任何客套话、确认语、解释、免责声明。',
+                '输出必须是中文，使用 Markdown，结构清晰，便于直接保存。',
+                '若信息不足，优先列出 3-6 个必须澄清的问题，并给出一个最小可行版本（保守、安全）。',
+                '严格遵守用户安全红线与禁忌；对疼痛/伤病要给替代动作与风险提示（简短）。',
+              ].join('\n'),
+            ].join('\n\n');
+
+            const kindRequirements =
+              kind === 'training_plan'
+                ? [
+                  '生成训练计划：包含 热身/主训练/辅助/拉伸恢复；给出组数×次数×强度（RPE或重量区间）；',
+                  '如用户给出“今天/明天/本周/一周”，请在正文中显式写明对应的日期或范围；',
+                  '必须遵守“体重<100kg前严禁双脚离地跳跃”等安全红线（如上下文存在）。',
+                ].join('\n')
+                : kind === 'nutrition_plan'
+                  ? [
+                    '生成饮食方案：按餐次给建议（早餐/午餐/晚餐/加餐）；给出蛋白/碳水/脂肪大致范围；',
+                    '如有减脂/增肌目标，给出总热量策略与可执行替代食材。',
+                  ].join('\n')
+                  : kind === 'supplement_plan'
+                    ? [
+                      '生成补剂方案：给出补剂清单、剂量、时机、注意事项；避免夸大疗效；',
+                      '对肝肾/睡眠/血压风险给出简短提示。',
+                    ].join('\n')
+                    : [
+                      '分析任务：给出结论要点 + 依据（简短） + 下一步建议；不要长篇空话。',
+                    ].join('\n');
+
+            const promptLines = [
+              `任务类型：${kind}`,
+              `角色视角：${ROLE_NAMES[delegateRole]}`,
+              planDateHint ? `计划日期（如适用）：${planDateHint}` : null,
+              imageUrlRaw ? `图片URL：${imageUrlRaw}` : null,
+              '',
+              '用户请求：',
+              args.request,
+              '',
+              '输出要求：',
+              kindRequirements,
+            ].filter(Boolean) as string[];
+            const prompt = promptLines.join('\n');
+
+            const roleModel = getRoleLLMModel(this.env);
+            const maxOutputTokens =
+              kind === 'training_plan' ? 1800 :
+                kind === 'analysis' ? 1200 :
+                  1600;
+            const temperature = kind === 'analysis' ? 0.2 : 0.5;
+
+            const result = imageUrlRaw
+              ? await generateText({
+                model: roleModel,
+                system: delegateSystem,
+                messages: [{
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: prompt },
+                    { type: 'image', image: new URL(imageUrlRaw) },
+                  ],
+                }],
+                maxOutputTokens,
+                temperature,
+              })
+              : await generateText({
+                model: roleModel,
+                system: delegateSystem,
+                prompt,
+                maxOutputTokens,
+                temperature,
+              });
+
+            const text = (typeof result.text === 'string' ? result.text : '').trim();
+            const content = text.length > 12000 ? `${text.slice(0, 12000)}...(已截断)` : text;
+            return {
+              success: true,
+              kind,
+              role: delegateRole,
+              plan_date: planDateHint,
+              content,
+            };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : '委托生成失败';
+            return { success: false, error: message };
+          }
+        },
+      });
+
       const syncProfileTool = tool({
         description: [
           '当用户在对话中明确给出可写回的数据/操作（身体档案、伤病记录、训练目标、训练计划、饮食记录、日志等）时调用，用于把信息同步到用户数据。',
@@ -637,9 +762,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: await convertToModelMessages(trimmedConversation as any),
         tools: allowProfileSync
-          ? { query_user_data: queryUserDataTool, sync_profile: syncProfileTool }
-          : { query_user_data: queryUserDataTool },
-        stopWhen: allowProfileSync ? stepCountIs(3) : stepCountIs(2),
+          ? { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool, sync_profile: syncProfileTool }
+          : { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool },
+        stopWhen: allowProfileSync ? stepCountIs(6) : stepCountIs(4),
         onFinish: async (event) => {
           const text = event.text;
 
@@ -651,8 +776,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               routing_reason: routing.reason,
               architecture: 'aichat_agent_ws',
               model_alias: modelAlias,
-              model_route: useRoleModel ? 'complex_task' : 'simple_task',
-              model_route_source: executionDecision.source,
+              model_route: 'main_model_with_delegate_tools',
+              tools_used: Array.from(new Set(event.steps.flatMap((s) => s.toolCalls.map((t) => t.toolName)))),
+              delegate_generate_used: event.steps.some((s) => s.toolCalls.some((t) => t.toolName === 'delegate_generate')),
             };
 
             await saveOrchestrateAssistantMessage(this.env.DB, userId, text, metadata);
