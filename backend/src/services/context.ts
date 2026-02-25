@@ -77,7 +77,7 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
     : '未设置';
 
   const profileStr = ctx.profile
-    ? `身体基础数据：身高${ctx.profile.height || '未填'}cm，体重${ctx.profile.weight || '未填'}kg，年龄${ctx.profile.age || '未填'}，性别${ctx.profile.gender === 'male' ? '男' : ctx.profile.gender === 'female' ? '女' : '未填'}，训练目标：${trainingGoalStr}，训练经验：${ctx.profile.experience_level || '未填'}`
+    ? `身体基础数据：身高${ctx.profile.height || '未填'}cm，体重${ctx.profile.weight || '未填'}kg，出生日期${ctx.profile.birth_date || '未填'}，性别${ctx.profile.gender === 'male' ? '男' : ctx.profile.gender === 'female' ? '女' : '未填'}，训练目标：${trainingGoalStr}，训练年限${ctx.profile.training_years ?? '未填'}年`
     : '用户尚未填写身体基础数据。';
 
   switch (role) {

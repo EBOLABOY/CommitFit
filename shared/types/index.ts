@@ -28,32 +28,32 @@ export interface AuthResponse {
     id: string;
     email: string;
     nickname: string | null;
+    avatar_key: string | null;
   };
 }
 
 // ============ User Profile ============
 
 export type Gender = 'male' | 'female';
-export type ExperienceLevel = 'beginner' | 'intermediate' | 'advanced';
 
 export interface UserProfile {
   user_id: string;
   height: number | null;
   weight: number | null;
-  age: number | null;
+  birth_date: string | null; // YYYY-MM-DD
   gender: Gender | null;
+  training_years: number | null;
   training_goal: string | null;
-  experience_level: ExperienceLevel | null;
   updated_at: string;
 }
 
 export interface UpdateProfileRequest {
   height?: number;
   weight?: number;
-  age?: number;
+  birth_date?: string | null;
   gender?: Gender;
+  training_years?: number | null;
   training_goal?: string;
-  experience_level?: ExperienceLevel;
 }
 
 // ============ Health Metrics ============
@@ -187,8 +187,10 @@ export interface OrchestrateAutoWriteSummary {
   conditions_upserted: number;
   training_goals_upserted: number;
   health_metrics_created: number;
+  training_plan_created: boolean;
   nutrition_plan_created: boolean;
   supplement_plan_created: boolean;
+  diet_records_created: number;
   daily_log_upserted: boolean;
 }
 

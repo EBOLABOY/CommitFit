@@ -97,6 +97,8 @@ export const api = {
     }),
 
   getMe: () => request('/api/auth/me'),
+  updateMe: (data: { nickname?: string | null; avatar_key?: string | null }) =>
+    request('/api/auth/me', { method: 'PUT', body: JSON.stringify(data) }),
 
   changePassword: (oldPassword: string, newPassword: string) =>
     request('/api/auth/password', {

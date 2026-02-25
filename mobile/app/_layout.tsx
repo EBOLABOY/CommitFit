@@ -1,6 +1,8 @@
 import { Stack } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { StatusBar, useColorScheme } from 'react-native';
+import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
+import * as SystemUI from 'expo-system-ui';
 import { useAuthStore } from '../stores/auth';
 import { getToken, clearToken, api } from '../services/api';
 import { useRouter, useSegments } from 'expo-router';
@@ -17,6 +19,18 @@ export default function RootLayout() {
   const colorScheme = useColorScheme();
   const [isReady, setIsReady] = useState(false);
 
+  const [fontsLoaded] = useFonts({
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+    Inter_700Bold,
+  });
+
+  // 设置根背景色
+  useEffect(() => {
+    SystemUI.setBackgroundColorAsync(Colors.background);
+  }, [Colors.background]);
+
   // Validate existing token on mount
   useEffect(() => {
     (async () => {
@@ -25,7 +39,7 @@ export default function RootLayout() {
         try {
           const res = await api.getMe();
           if (res.success && res.data) {
-            const user = res.data as { id: string; email: string; nickname: string | null };
+            const user = res.data as { id: string; email: string; nickname: string | null; avatar_key: string | null };
             setUser(user);
           } else {
             await clearToken();
@@ -50,7 +64,7 @@ export default function RootLayout() {
     }
   }, [isAuthenticated, segments, router, isReady]);
 
-  if (!isReady) return <LoadingScreen />;
+  if (!isReady || !fontsLoaded) return <LoadingScreen />;
 
   return (
     <>
@@ -67,8 +81,8 @@ export default function RootLayout() {
         <Stack.Screen name="(auth)" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen
-          name="profile/body-data"
-          options={{ headerShown: true, title: '身体数据' }}
+          name="profile/edit"
+          options={{ headerShown: true, title: '编辑资料' }}
         />
         <Stack.Screen
           name="profile/health-metrics"
@@ -81,6 +95,14 @@ export default function RootLayout() {
         <Stack.Screen
           name="profile/training-goal"
           options={{ headerShown: true, title: '训练目标' }}
+        />
+        <Stack.Screen
+          name="profile/diet-plan"
+          options={{ headerShown: true, title: '饮食方案' }}
+        />
+        <Stack.Screen
+          name="profile/supplement-plan"
+          options={{ headerShown: true, title: '补剂方案' }}
         />
         <Stack.Screen
           name="profile/training-history"

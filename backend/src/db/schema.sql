@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   nickname TEXT,
+  avatar_key TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -12,8 +13,10 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   user_id TEXT PRIMARY KEY REFERENCES users(id),
   height REAL,
   weight REAL,
+  birth_date TEXT,               -- YYYY-MM-DD
   age INTEGER,
   gender TEXT,
+  training_years REAL,           -- 训练年限（年）
   training_goal TEXT,
   experience_level TEXT,
   updated_at TEXT DEFAULT (datetime('now'))

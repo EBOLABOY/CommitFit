@@ -1,14 +1,17 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../types';
 import { authMiddleware } from '../middleware/auth';
-import { isEnumValue, isNumberInRange, isPlainObject } from '../utils/validate';
+import { isEnumValue, isISODateString, isNumberInRange, isPlainObject } from '../utils/validate';
 
 export const profileRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 profileRoutes.use('*', authMiddleware);
 
 const GENDER_VALUES = ['male', 'female'] as const;
-const EXPERIENCE_VALUES = ['beginner', 'intermediate', 'advanced'] as const;
+
+function isDateOnly(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && isISODateString(value);
+}
 
 // GET /api/profile
 profileRoutes.get('/', async (c) => {
@@ -61,31 +64,36 @@ profileRoutes.put('/', async (c) => {
     values.push(body.weight);
   }
 
-  if (body.age !== undefined) {
-    if (!isNumberInRange(body.age, 1, 150)) {
-      return c.json({ success: false, error: 'age 必须在 1-150 之间' }, 400);
+  if (body.birth_date !== undefined) {
+    if (body.birth_date === null) {
+      fields.push('birth_date = ?');
+      values.push(null);
+    } else if (typeof body.birth_date === 'string' && isDateOnly(body.birth_date)) {
+      fields.push('birth_date = ?');
+      values.push(body.birth_date);
+    } else {
+      return c.json({ success: false, error: 'birth_date 必须是 YYYY-MM-DD 或 null' }, 400);
     }
-    fields.push('age = ?');
-    values.push(body.age);
   }
 
   if (body.gender !== undefined) {
-    if (!isEnumValue(body.gender, GENDER_VALUES)) {
+    if (body.gender !== null && !isEnumValue(body.gender, GENDER_VALUES)) {
       return c.json({ success: false, error: 'gender 只能是 male 或 female' }, 400);
     }
     fields.push('gender = ?');
     values.push(body.gender);
   }
 
-  if (body.experience_level !== undefined) {
-    if (!isEnumValue(body.experience_level, EXPERIENCE_VALUES)) {
-      return c.json(
-        { success: false, error: 'experience_level 只能是 beginner/intermediate/advanced' },
-        400
-      );
+  if (body.training_years !== undefined) {
+    if (body.training_years === null) {
+      fields.push('training_years = ?');
+      values.push(null);
+    } else if (isNumberInRange(body.training_years, 0, 80)) {
+      fields.push('training_years = ?');
+      values.push(Number(body.training_years.toFixed(1)));
+    } else {
+      return c.json({ success: false, error: 'training_years 必须在 0-80 之间或 null' }, 400);
     }
-    fields.push('experience_level = ?');
-    values.push(body.experience_level);
   }
 
   if (body.training_goal !== undefined) {

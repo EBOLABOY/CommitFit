@@ -6,10 +6,10 @@ import { api } from '../services/api';
 export interface ProfileData {
     height: number | null;
     weight: number | null;
-    age: number | null;
+    birth_date: string | null;
     gender: string | null;
+    training_years: number | null;
     training_goal: string | null;
-    experience_level: string | null;
 }
 
 interface ProfileState {

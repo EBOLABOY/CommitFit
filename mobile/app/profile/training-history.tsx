@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { View, Text, ScrollView, StyleSheet, RefreshControl, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, RefreshControl, TouchableOpacity, Alert, Modal } from 'react-native';
 import { Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -90,6 +90,8 @@ export default function TrainingHistoryScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedDate, setSelectedDate] = useState(todayStr);
+  const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [previewTitle, setPreviewTitle] = useState('');
 
   // Collapsible exercise state: stores "planId-sectionIdx-exerciseIdx" keys
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -160,6 +162,12 @@ export default function TrainingHistoryScreen() {
     ]);
   };
 
+  const openPlanPreview = useCallback((plan: TrainingPlan) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setPreviewTitle(`训练计划 · ${plan.plan_date}`);
+    setPreviewContent(parseContent(plan.content));
+  }, []);
+
   if (loading) {
     return (
       <View style={[styles.container, { backgroundColor: Colors.background }]}>
@@ -206,7 +214,8 @@ export default function TrainingHistoryScreen() {
             const sections = parsePlanSections(plan.content);
             return (
               <Animated.View key={plan.id} entering={FadeInDown.duration(300).delay(index * 60)}>
-                <Card style={styles.planCard}>
+                <TouchableOpacity activeOpacity={1} onLongPress={() => openPlanPreview(plan)} delayLongPress={360}>
+                  <Card style={[styles.planCard, { borderLeftColor: Colors.primary }]}>
                   <View style={styles.planHeader}>
                     <View style={styles.planDate}>
                       <Ionicons name="calendar-outline" size={14} color={Colors.textTertiary} />
@@ -225,6 +234,7 @@ export default function TrainingHistoryScreen() {
                       />
                     </TouchableOpacity>
                   </View>
+                  <Text style={[styles.longPressHint, { color: Colors.textTertiary }]}>长按查看完整计划</Text>
 
                   {sections ? (
                     sections.map((section, si) => {
@@ -274,12 +284,36 @@ export default function TrainingHistoryScreen() {
                       <Text style={[styles.notesText, { color: Colors.textSecondary }]}>{plan.notes}</Text>
                     </View>
                   )}
-                </Card>
+                  </Card>
+                </TouchableOpacity>
               </Animated.View>
             );
           })
         )}
       </ScrollView>
+
+      <Modal
+        visible={!!previewContent}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPreviewContent(null)}
+      >
+        <View style={styles.previewOverlay}>
+          <View style={[styles.previewCard, { backgroundColor: Colors.surface }]}>
+            <View style={[styles.previewHeader, { borderBottomColor: Colors.borderLight }]}>
+              <Text style={[styles.previewTitle, { color: Colors.text }]} numberOfLines={1}>
+                {previewTitle || '训练计划全文'}
+              </Text>
+              <TouchableOpacity onPress={() => setPreviewContent(null)}>
+                <Ionicons name="close" size={20} color={Colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={styles.previewBody}>
+              <Text style={[styles.previewText, { color: Colors.text }]}>{previewContent || ''}</Text>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -288,10 +322,11 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { padding: Spacing.xl, gap: Spacing.lg },
   calendarSkeleton: { padding: Spacing.lg },
-  planCard: { padding: Spacing.lg, borderLeftWidth: 3, borderLeftColor: '#FF6B35' },
+  planCard: { padding: Spacing.lg, borderLeftWidth: 3 },
   planHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: Spacing.md },
   planDate: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs },
   dateText: { fontSize: FontSize.sm },
+  longPressHint: { fontSize: FontSize.xs, marginBottom: Spacing.sm },
 
   // Structured sections (matches home page)
   sectionFirst: { marginBottom: Spacing.sm },
@@ -311,4 +346,37 @@ const styles = StyleSheet.create({
   notesContainer: { marginTop: Spacing.md, paddingTop: Spacing.md, borderTopWidth: 1 },
   notesLabel: { fontSize: FontSize.xs, fontWeight: '600', marginBottom: Spacing.xs },
   notesText: { fontSize: FontSize.sm },
+
+  previewOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    padding: Spacing.xl,
+  },
+  previewCard: {
+    borderRadius: Radius.lg,
+    maxHeight: '82%',
+    overflow: 'hidden',
+  },
+  previewHeader: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  previewTitle: {
+    flex: 1,
+    fontSize: FontSize.md,
+    fontWeight: '700',
+  },
+  previewBody: {
+    padding: Spacing.lg,
+  },
+  previewText: {
+    fontSize: FontSize.sm,
+    lineHeight: 22,
+  },
 });

@@ -8,34 +8,34 @@ export const SUPERVISOR_AGENT_NAMESPACE = 'supervisor-agent';
 // ============ Design Tokens ============
 
 export const LightColors = {
-  primary: '#10B981',      // Emerald Green, 活力翡翠绿（呼应参考图）
-  primaryLight: '#ECFDF5', // 极淡的绿
-  primaryAlpha: 'rgba(16, 185, 129, 0.15)', // 增加一点通透感
-  danger: '#EF4444',       // 错误红
+  primary: '#10B981',      // 薄荷蓝绿（区别于 Syna 的翡翠绿）
+  primaryLight: '#ECFDF5',
+  primaryAlpha: 'rgba(16, 185, 129, 0.10)',
+  danger: '#DC2626',       // Apple 红
   dangerLight: '#FEF2F2',
-  info: '#3B82F6',         // 科技蓝
-  infoLight: '#EFF6FF',
-  success: '#22C55E',      // 确认绿
+  info: '#0EA5E9',         // 天空蓝
+  infoLight: '#F0F9FF',
+  success: '#16A34A',      // 翡翠绿
   successLight: '#F0FDF4',
-  warning: '#F59E0B',      // 活力黄
-  warningLight: '#FFFBEB',
+  warning: '#EAB308',      // 琥珀黄
+  warningLight: '#FEFCE8',
 
-  text: '#0F172A',         // Slate 900，更深邃以提升对比度
-  textSecondary: '#475569', // Slate 600
+  text: '#0F172A',         // Slate 900，极深
+  textSecondary: '#64748B', // Slate 500
   textTertiary: '#94A3B8',  // Slate 400
-  background: '#F1F5F9',   // Slate 100，非纯白，高级浅灰底
-  surface: '#FFFFFF',      // 卡片纯白色，拉开与背景级差
+  background: '#F0FDF4',   // 微绿底色，运动氛围
+  surface: '#FFFFFF',
   border: '#E2E8F0',       // Slate 200
-  borderLight: '#F8FAFC',  // Slate 50
+  borderLight: '#F1F5F9',  // Slate 100
   disabled: '#CBD5E1',     // Slate 300
 
-  glassBackground: 'rgba(255, 255, 255, 0.85)',
+  glassBackground: 'rgba(255, 255, 255, 0.78)',
 };
 
 export const DarkColors = {
-  primary: '#FF8555',      // 暗模式下提亮的珊瑚
-  primaryLight: '#431407',
-  primaryAlpha: 'rgba(255, 133, 85, 0.15)',
+  primary: '#34D399',      // 暗模式下提亮的薄荷绿
+  primaryLight: '#064E3B',
+  primaryAlpha: 'rgba(52, 211, 153, 0.15)',
   danger: '#EF4444',
   dangerLight: '#450a0a',
   info: '#38BDF8',
@@ -91,12 +91,20 @@ export const FontSize = {
   hero: 34,
 } as const;
 
+// ============ Gradients ============
+
+export const Gradients = {
+  hero: ['#10B981', '#06B6D4'] as const,      // 薄荷绿→青色
+  heroLight: ['#ECFDF5', '#F0FDFA'] as const, // 浅色渐变
+  card: ['#F0FDF4', '#F0FDFA'] as const,       // 卡片微渐变
+} as const;
+
 // ============ Shadows ============
 
 export const Shadows = {
-  sm: { shadowColor: '#64748B', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
-  md: { shadowColor: '#64748B', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.08, shadowRadius: 20, elevation: 4 },
-  lg: { shadowColor: '#64748B', shadowOffset: { width: 0, height: 16 }, shadowOpacity: 0.10, shadowRadius: 32, elevation: 6 },
+  sm: { shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 4, elevation: 1 },
+  md: { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 8, elevation: 3 },
+  lg: { shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.10, shadowRadius: 12, elevation: 5 },
 } as const;
 
 // ============ HitSlop ============
@@ -112,7 +120,7 @@ export const AI_ROLES = {
   doctor: { name: '运动医生', icon: 'heart' as const, color: '#DC2626', colorLight: '#FEF2F2', description: '解读体检指标，评估运动风险' },
   rehab: { name: '康复师', icon: 'fitness' as const, color: '#0EA5E9', colorLight: '#F0F9FF', description: '伤病评估，康复方案制定' },
   nutritionist: { name: '营养师', icon: 'nutrition' as const, color: '#16A34A', colorLight: '#F0FDF4', description: '营养方案，饮食搭配指导' },
-  trainer: { name: '私人教练', icon: 'barbell' as const, color: '#FF6B35', colorLight: '#FFF4EF', description: '训练计划制定与调整' },
+  trainer: { name: '私人教练', icon: 'barbell' as const, color: '#F59E0B', colorLight: '#FFFBEB', description: '训练计划制定与调整' },
 } as const;
 
 // ============ Enum Labels ============

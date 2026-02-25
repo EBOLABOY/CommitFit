@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
+  Modal,
 } from 'react-native';
 import { Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -26,6 +27,7 @@ export default function TrainingGoalScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [previewGoal, setPreviewGoal] = useState<{ name: string; description: string } | null>(null);
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -79,6 +81,11 @@ export default function TrainingGoalScreen() {
       { text: '删除', style: 'destructive', onPress: async () => { await api.deleteTrainingGoal(item.id); fetchGoals(); } },
     ]);
   };
+
+  const openGoalPreview = useCallback((item: TrainingGoal) => {
+    const fullText = [item.name, item.description || '暂无详细描述'].filter(Boolean).join('\n\n');
+    setPreviewGoal({ name: item.name, description: fullText });
+  }, []);
 
   const handleImageResult = useCallback(async (rawText: string) => {
     const parsed = parseAIJson<{ goals: Array<{ name: string; description?: string }> }>(rawText);
@@ -176,12 +183,18 @@ export default function TrainingGoalScreen() {
                 <Text style={[styles.sectionLabel, { color: Colors.textTertiary }]}>进行中 ({active.length})</Text>
                 {active.map((item, index) => (
                   <Animated.View key={item.id} entering={FadeInDown.duration(300).delay(index * 50)}>
+                    <TouchableOpacity activeOpacity={1} onLongPress={() => openGoalPreview(item)} delayLongPress={320}>
                     <Card style={styles.goalCard}>
                       <View style={styles.goalHeader}>
                         <Text style={[styles.goalName, { color: Colors.text }]}>{item.name}</Text>
                         <Badge label="进行中" color={Colors.warning} />
                       </View>
-                      {item.description && <Text style={[styles.goalDesc, { color: Colors.textSecondary }]}>{item.description}</Text>}
+                      {item.description && (
+                        <Text style={[styles.goalDesc, { color: Colors.textSecondary }]} numberOfLines={3}>
+                          {item.description}
+                        </Text>
+                      )}
+                      <Text style={[styles.longPressHint, { color: Colors.textTertiary }]}>长按查看完整目标</Text>
                       <View style={[styles.goalActions, { borderTopColor: Colors.borderLight }]}>
                         <TouchableOpacity style={styles.actionBtn} onPress={() => handleToggleStatus(item)} hitSlop={HitSlop.sm}>
                           <Ionicons name="checkmark-circle-outline" size={18} color={Colors.success} />
@@ -193,6 +206,7 @@ export default function TrainingGoalScreen() {
                         </TouchableOpacity>
                       </View>
                     </Card>
+                    </TouchableOpacity>
                   </Animated.View>
                 ))}
               </View>
@@ -201,11 +215,18 @@ export default function TrainingGoalScreen() {
               <View style={styles.section}>
                 <Text style={[styles.sectionLabel, { color: Colors.textTertiary }]}>已完成 ({completed.length})</Text>
                 {completed.map((item) => (
-                  <Card key={item.id} style={[styles.goalCard, { opacity: 0.6 }]}>
+                  <TouchableOpacity key={item.id} activeOpacity={1} onLongPress={() => openGoalPreview(item)} delayLongPress={320}>
+                  <Card style={[styles.goalCard, { opacity: 0.6 }]}>
                     <View style={styles.goalHeader}>
                       <Text style={[styles.goalName, { color: Colors.text }]}>{item.name}</Text>
                       <Badge label="已完成" color={Colors.success} />
                     </View>
+                    {item.description && (
+                      <Text style={[styles.goalDesc, { color: Colors.textSecondary }]} numberOfLines={3}>
+                        {item.description}
+                      </Text>
+                    )}
+                    <Text style={[styles.longPressHint, { color: Colors.textTertiary }]}>长按查看完整目标</Text>
                     <View style={[styles.goalActions, { borderTopColor: Colors.borderLight }]}>
                       <TouchableOpacity style={styles.actionBtn} onPress={() => handleToggleStatus(item)} hitSlop={HitSlop.sm}>
                         <Ionicons name="refresh-outline" size={18} color={Colors.warning} />
@@ -217,12 +238,36 @@ export default function TrainingGoalScreen() {
                       </TouchableOpacity>
                     </View>
                   </Card>
+                  </TouchableOpacity>
                 ))}
               </View>
             )}
           </>
         )}
       </ScrollView>
+
+      <Modal
+        visible={!!previewGoal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPreviewGoal(null)}
+      >
+        <View style={styles.previewOverlay}>
+          <View style={[styles.previewCard, { backgroundColor: Colors.surface }]}>
+            <View style={[styles.previewHeader, { borderBottomColor: Colors.borderLight }]}>
+              <Text style={[styles.previewTitle, { color: Colors.text }]} numberOfLines={1}>
+                {previewGoal?.name || '目标详情'}
+              </Text>
+              <TouchableOpacity onPress={() => setPreviewGoal(null)}>
+                <Ionicons name="close" size={20} color={Colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={styles.previewBody}>
+              <Text style={[styles.previewText, { color: Colors.text }]}>{previewGoal?.description || ''}</Text>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -243,7 +288,40 @@ const styles = StyleSheet.create({
   goalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: Spacing.xs },
   goalName: { fontSize: FontSize.lg, fontWeight: '500', flex: 1, marginRight: Spacing.sm },
   goalDesc: { fontSize: FontSize.sm, lineHeight: 20, marginBottom: Spacing.sm },
+  longPressHint: { fontSize: FontSize.xs, marginBottom: Spacing.sm },
   goalActions: { flexDirection: 'row', gap: Spacing.xl, marginTop: Spacing.sm, paddingTop: Spacing.sm, borderTopWidth: 1 },
   actionBtn: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs },
   actionText: { fontSize: FontSize.sm, fontWeight: '500' },
+  previewOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    padding: Spacing.xl,
+  },
+  previewCard: {
+    borderRadius: Radius.lg,
+    maxHeight: '82%',
+    overflow: 'hidden',
+  },
+  previewHeader: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  previewTitle: {
+    flex: 1,
+    fontSize: FontSize.md,
+    fontWeight: '700',
+  },
+  previewBody: {
+    padding: Spacing.lg,
+  },
+  previewText: {
+    fontSize: FontSize.sm,
+    lineHeight: 22,
+  },
 });

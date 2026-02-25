@@ -1,4 +1,5 @@
 import { parseContent } from './index';
+import { LightColors } from '../constants';
 import type { TrainingPlan, NutritionPlan } from '../../shared/types';
 
 // ============ Types ============
@@ -37,7 +38,7 @@ const SLOT_META: ScheduleSlotMeta[] = [
   { id: 'breakfast', label: '早餐', icon: 'sunny-outline', color: '#F59E0B' },
   { id: 'pre_workout', label: '练前', icon: 'flash-outline', color: '#8B5CF6' },
   { id: 'lunch', label: '午餐', icon: 'restaurant-outline', color: '#16A34A' },
-  { id: 'training', label: '训练', icon: 'barbell-outline', color: '#FF6B35' },
+  { id: 'training', label: '训练', icon: 'barbell-outline', color: LightColors.primary },
   { id: 'post_workout', label: '练后', icon: 'water-outline', color: '#0EA5E9' },
   { id: 'dinner', label: '晚餐', icon: 'moon-outline', color: '#EC4899' },
   { id: 'bedtime', label: '睡前', icon: 'bed-outline', color: '#6366F1' },

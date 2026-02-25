@@ -20,14 +20,15 @@ import Animated, {
   withTiming,
   withSequence,
   withDelay,
+  withRepeat,
   Easing,
   runOnJS,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuthStore } from '../../stores/auth';
 import { useProfileStore } from '../../stores/profile';
-import { SectionHeader, Card, EmptyState, Skeleton } from '../../components/ui';
-import { Spacing, Radius, FontSize, Shadows } from '../../constants';
+import { SectionHeader, Card, EmptyState, Skeleton, ProgressRing, GradientButton } from '../../components/ui';
+import { Spacing, Radius, FontSize, Shadows, Gradients } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
 import { api } from '../../services/api';
 import { WeightChartModal } from '../../components/WeightChartModal';
@@ -66,11 +67,12 @@ function getCompletionKey(dateStr: string) {
 
 // ============ Source badge colors ============
 
-const SOURCE_COLORS: Record<string, string> = {
-  饮食: '#16A34A',
-  补剂: '#8B5CF6',
-  训练: '#FF6B35',
-};
+function getSourceColor(sourceLabel: string, themeColors: ThemeColors): string {
+  if (sourceLabel === '饮食') return themeColors.success;
+  if (sourceLabel === '补剂') return '#8B5CF6';
+  if (sourceLabel === '训练') return themeColors.primary;
+  return themeColors.primary;
+}
 
 // ============ ScheduleSlotRow Component ============
 
@@ -210,24 +212,27 @@ function ScheduleSlotRow({
               >
                 {slot.meta.label}
               </Text>
-              {slot.content.map((c) => (
-                <View
-                  key={c.sourceLabel}
-                  style={[
-                    slotStyles.sourceBadge,
-                    { backgroundColor: (SOURCE_COLORS[c.sourceLabel] || themeColors.primary) + '18' },
-                  ]}
-                >
-                  <Text
+              {slot.content.map((c) => {
+                const sourceColor = getSourceColor(c.sourceLabel, themeColors);
+                return (
+                  <View
+                    key={c.sourceLabel}
                     style={[
-                      slotStyles.sourceBadgeText,
-                      { color: SOURCE_COLORS[c.sourceLabel] || themeColors.primary },
+                      slotStyles.sourceBadge,
+                      { backgroundColor: sourceColor + '18' },
                     ]}
                   >
-                    {c.sourceLabel}
-                  </Text>
-                </View>
-              ))}
+                    <Text
+                      style={[
+                        slotStyles.sourceBadgeText,
+                        { color: sourceColor },
+                      ]}
+                    >
+                      {c.sourceLabel}
+                    </Text>
+                  </View>
+                );
+              })}
             </View>
             {!isExpanded && (
               <Text
@@ -255,7 +260,7 @@ function ScheduleSlotRow({
                 <Text
                   style={[
                     slotStyles.sourceGroupLabel,
-                    { color: SOURCE_COLORS[contentItem.sourceLabel] || themeColors.primary },
+                    { color: getSourceColor(contentItem.sourceLabel, themeColors) },
                   ]}
                 >
                   {contentItem.sourceLabel}
@@ -346,6 +351,64 @@ const slotStyles = StyleSheet.create({
     fontSize: FontSize.sm,
     lineHeight: 20,
     marginLeft: Spacing.xs,
+  },
+});
+
+// ============ HeroAvatar (呼吸光晕) ============
+
+function HeroAvatar({ nickname }: { nickname?: string | null }) {
+  const glowScale = useSharedValue(1);
+  const glowOpacity = useSharedValue(0.4);
+
+  useEffect(() => {
+    glowScale.value = withRepeat(
+      withTiming(1.4, { duration: 2000, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      true
+    );
+    glowOpacity.value = withRepeat(
+      withTiming(0.1, { duration: 2000, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      true
+    );
+  }, [glowScale, glowOpacity]);
+
+  const glowStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: glowScale.value }],
+    opacity: glowOpacity.value,
+  }));
+
+  return (
+    <View style={heroAvatarStyles.container}>
+      <Animated.View style={[heroAvatarStyles.glow, glowStyle]} />
+      <View style={heroAvatarStyles.circle}>
+        <Text style={heroAvatarStyles.text}>{(nickname || '练')[0]}</Text>
+      </View>
+    </View>
+  );
+}
+
+const heroAvatarStyles = StyleSheet.create({
+  container: { width: 52, height: 52, justifyContent: 'center', alignItems: 'center' },
+  glow: {
+    position: 'absolute',
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: 'rgba(255,255,255,0.5)',
+  },
+  circle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  text: {
+    fontSize: FontSize.xl,
+    fontWeight: '700',
+    color: '#FFF',
   },
 });
 
@@ -603,16 +666,36 @@ export default function HomeScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={themeColors.primary} />}
       >
         <LinearGradient
-          colors={[themeColors.primary, themeColors.primary + 'CC', themeColors.background]}
-          locations={[0, 0.6, 1]}
+          colors={[...Gradients.hero, themeColors.background]}
+          locations={[0, 0.5, 1]}
           style={[styles.heroHeader, { paddingTop: insets.top + 16 }]}
         >
-          <Text style={styles.headerDate}>{today}</Text>
-          <Text style={styles.greeting}>你好，{user?.nickname || '练了码'}！</Text>
-          <Text style={styles.subtitle}>准备好开始今天的挑战了吗？</Text>
+          <View style={styles.heroRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.headerDate}>{today}</Text>
+              <Text style={styles.greeting}>你好，{user?.nickname || '练了码'}！</Text>
+              <Text style={styles.subtitle}>准备好开始今天的挑战了吗？</Text>
+            </View>
+            <HeroAvatar nickname={user?.nickname} />
+          </View>
         </LinearGradient>
 
         <View style={styles.mainContent}>
+          {/* === 今日完成度圆环 === */}
+          {!scheduleLoading && scheduleSlots.length > 0 && (
+            <Animated.View entering={FadeInDown.duration(300)} style={styles.ringSection}>
+              <ProgressRing
+                progress={scheduleSlots.length > 0 ? completedCount / scheduleSlots.length : 0}
+                size={100}
+                strokeWidth={10}
+                color={themeColors.primary}
+                trackColor={themeColors.borderLight}
+                value={`${completedCount}/${scheduleSlots.length}`}
+                label="今日进度"
+              />
+            </Animated.View>
+          )}
+
           {/* === 今日记录: 三横排卡片 === */}
           <SectionHeader title="今日记录" />
 
@@ -818,7 +901,7 @@ export default function HomeScreen() {
                       styles.progressBarFill,
                       {
                         width: `${scheduleSlots.length > 0 ? (completedCount / scheduleSlots.length) * 100 : 0}%`,
-                        backgroundColor: completedCount === scheduleSlots.length ? '#22C55E' : themeColors.primary,
+                        backgroundColor: completedCount === scheduleSlots.length ? themeColors.primary : themeColors.primary,
                       },
                     ]}
                   />
@@ -830,6 +913,15 @@ export default function HomeScreen() {
               </View>
             </View>
           )}
+          {/* === 渐变 CTA 按钮 === */}
+          <View style={{ marginTop: Spacing.xl }}>
+            <GradientButton
+              title="开始 AI 对话"
+              subtitle="获取个性化训练与营养建议"
+              icon="arrow-forward"
+              onPress={() => router.push('/(tabs)/ai')}
+            />
+          </View>
         </View>
       </ScrollView>
       <WeightChartModal visible={weightChartVisible} onClose={() => setWeightChartVisible(false)} />
@@ -844,6 +936,27 @@ const styles = StyleSheet.create({
   heroHeader: {
     paddingHorizontal: Spacing.xl,
     paddingBottom: Spacing.xxl,
+  },
+  heroRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  heroAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  heroAvatarText: {
+    fontSize: FontSize.xl,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  ringSection: {
+    alignItems: 'center',
+    marginBottom: Spacing.lg,
   },
   headerDate: { fontSize: FontSize.sm, color: 'rgba(255,255,255,0.7)', marginBottom: Spacing.xs },
   greeting: { fontSize: FontSize.title, fontWeight: '700', color: '#FFF' },
@@ -879,7 +992,7 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.sm,
   },
   logTileValue: {
-    fontSize: FontSize.xl,
+    fontSize: FontSize.title,
     fontWeight: '700',
   },
   logTileUnit: {

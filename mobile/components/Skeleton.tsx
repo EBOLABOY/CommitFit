@@ -5,10 +5,13 @@ import Animated, {
     useAnimatedStyle,
     withRepeat,
     withTiming,
-    withSequence,
     Easing,
+    interpolate,
 } from 'react-native-reanimated';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useThemeColor } from '../hooks/useThemeColor';
+
+// 带 shimmer 闪光效果的高级骨架屏组件
 
 interface SkeletonProps {
     width?: number | string;
@@ -19,44 +22,69 @@ interface SkeletonProps {
 
 export function Skeleton({ width = '100%', height = 20, style, borderRadius = 8 }: SkeletonProps) {
     const themeColors = useThemeColor();
-    const opacity = useSharedValue(0.4);
+    const shimmerTranslate = useSharedValue(0);
 
     useEffect(() => {
-        opacity.value = withRepeat(
-            withSequence(
-                withTiming(1, { duration: 800, easing: Easing.inOut(Easing.ease) }),
-                withTiming(0.4, { duration: 800, easing: Easing.inOut(Easing.ease) })
-            ),
-            -1, // Infinite repeat
-            true // Reverse
+        shimmerTranslate.value = withRepeat(
+            withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+            -1, // 无限循环
+            false // 不反转，单向扫过
         );
-    }, [opacity]);
+    }, [shimmerTranslate]);
 
-    const animatedStyle = useAnimatedStyle(() => {
+    const shimmerStyle = useAnimatedStyle(() => {
+        const translateX = interpolate(
+            shimmerTranslate.value,
+            [0, 1],
+            [-200, 200]
+        );
         return {
-            opacity: opacity.value,
+            transform: [{ translateX }],
         };
     });
 
     return (
-        <Animated.View
+        <View
             style={[
                 styles.skeleton,
                 {
                     width: width as any,
                     height: height as any,
                     borderRadius,
-                    backgroundColor: themeColors.border, // 使用边框色作为默认骨架底色（在明暗模式下都合适）
+                    backgroundColor: themeColors.border,
                 },
-                animatedStyle,
                 style,
             ]}
-        />
+        >
+            <Animated.View style={[styles.shimmerContainer, shimmerStyle]}>
+                <LinearGradient
+                    colors={[
+                        'transparent',
+                        themeColors.surface + '80',
+                        themeColors.surface + 'CC',
+                        themeColors.surface + '80',
+                        'transparent',
+                    ]}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={styles.shimmerGradient}
+                />
+            </Animated.View>
+        </View>
     );
 }
 
 const styles = StyleSheet.create({
     skeleton: {
         overflow: 'hidden',
+    },
+    shimmerContainer: {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        width: 200,
+    },
+    shimmerGradient: {
+        flex: 1,
     },
 });

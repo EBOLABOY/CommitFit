@@ -578,6 +578,7 @@ export function useAgentChat(sessionId = 'default') {
             role: 'user',
             parts,
           }],
+          allow_profile_sync: true,
         }),
       },
     }));

@@ -11,7 +11,7 @@ import { Link } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import Toast from 'react-native-toast-message';
 import { useAuthStore } from '../../stores/auth';
-import { Spacing, FontSize } from '../../constants';
+import { Spacing, FontSize, Gradients } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
 import { Button, ThemedInput } from '../../components/ui';
 
@@ -35,8 +35,8 @@ export default function LoginScreen() {
 
   return (
     <LinearGradient
-      colors={[Colors.primaryLight, Colors.background]}
-      locations={[0, 0.5]}
+      colors={[...Gradients.heroLight, Colors.background]}
+      locations={[0, 0.4, 1]}
       style={styles.gradient}
     >
       <KeyboardAvoidingView

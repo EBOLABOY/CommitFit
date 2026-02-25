@@ -306,8 +306,10 @@ export default function AIChatScreen() {
     if (writebackSummary.conditions_upserted > 0) tags.push(`伤病记录 ${writebackSummary.conditions_upserted} 条`);
     if (writebackSummary.training_goals_upserted > 0) tags.push(`训练目标 ${writebackSummary.training_goals_upserted} 条`);
     if (writebackSummary.health_metrics_created > 0) tags.push(`理化指标 ${writebackSummary.health_metrics_created} 条`);
+    if (writebackSummary.training_plan_created) tags.push('训练记录');
     if (writebackSummary.nutrition_plan_created) tags.push('营养方案');
     if (writebackSummary.supplement_plan_created) tags.push('补剂方案');
+    if (writebackSummary.diet_records_created > 0) tags.push(`饮食记录 ${writebackSummary.diet_records_created} 条`);
     if (writebackSummary.daily_log_upserted) tags.push('体重/睡眠日志');
     return tags.length > 0 ? `已同步：${tags.join('、')}` : '';
   }, [writebackSummary]);

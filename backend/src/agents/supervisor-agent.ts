@@ -4,21 +4,19 @@ import type { Connection, ConnectionContext } from 'agents';
 import { jwtVerify } from 'jose';
 import type { AIRole } from '../../../shared/types';
 import type { Bindings } from '../types';
-import { getLLMModel } from '../services/ai-provider';
+import { getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
+import { decideExecutionMode } from '../services/execution-mode';
 import { syncProfileToolSchema } from './sync-profile-tool';
 import type {
   CustomBroadcast,
   RoutingBroadcast,
-  SupplementBroadcast,
   ProfileSyncResultBroadcast,
 } from './contracts';
 import {
   ROLE_NAMES,
   SYSTEM_PROMPTS,
-  decideRoute,
   saveOrchestrateAssistantMessage,
   saveOrchestrateUserMessage,
-  generateCollaboratorSupplements,
   applyAutoWriteback,
   resolveWritebackPayload,
   hasWritebackChanges,
@@ -112,6 +110,11 @@ async function consumeConnectRateLimit(
 
 function isValidPreferredRole(value: unknown): value is AIRole {
   return value === 'doctor' || value === 'rehab' || value === 'nutritionist' || value === 'trainer';
+}
+
+function resolveActiveRole(value: string | undefined): AIRole {
+  if (isValidPreferredRole(value)) return value;
+  return 'trainer';
 }
 
 function extractImageUrl(msg: AgentMessageLike | undefined): string | null {
@@ -292,8 +295,8 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
     const body = options?.body && typeof options.body === 'object'
       ? (options.body as Record<string, unknown>)
       : {};
-    const preferredRole = isValidPreferredRole(body.preferred_role) ? body.preferred_role : null;
-    const singleRole = body.single_role === true;
+    const requestedRole = isValidPreferredRole(body.preferred_role) ? body.preferred_role : null;
+    const activeRole = resolveActiveRole(this.env.ACTIVE_AI_ROLE);
     const allowProfileSync = body.allow_profile_sync !== false;
 
     const textResponse = (text: string): Response =>
@@ -306,6 +309,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const lastUserMsg = [...this.messages].reverse().find((m) => m.role === 'user');
       const userText = lastUserMsg ? extractText(lastUserMsg) : '';
       const userImageUrl = extractImageUrl(lastUserMsg as AgentMessageLike | undefined);
+      const hasImageInput = Boolean(userImageUrl);
 
       if (!userText.trim()) {
         return textResponse('请先输入你的问题');
@@ -328,25 +332,16 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         }))
         .filter((m) => m.content.trim().length > 0);
 
-      // 3. Route to best role
-      this.broadcastCustom({ type: 'status', message: '正在分析问题并分配专家...' });
-      let routing: { primaryRole: AIRole; collaborators: AIRole[]; reason: string };
-      if (preferredRole) {
-        routing = {
-          primaryRole: preferredRole,
-          collaborators: singleRole ? [] : [],
-          reason: '客户端指定角色',
-        };
-      } else {
-        try {
-          routing = await decideRoute(this.env, userText, history);
-        } catch {
-          routing = { primaryRole: 'trainer', collaborators: [], reason: '兜底路由' };
-        }
-        if (singleRole && routing.collaborators.length > 0) {
-          routing = { ...routing, collaborators: [] };
-        }
-      }
+      // 3. 单角色固定模式：不再进行多角色路由
+      this.broadcastCustom({ type: 'status', message: '单角色模式处理中...' });
+      const routing: { primaryRole: AIRole; collaborators: AIRole[]; reason: string } = {
+        primaryRole: activeRole,
+        collaborators: [],
+        reason:
+          requestedRole && requestedRole !== activeRole
+            ? `单角色固定为 ${ROLE_NAMES[activeRole]}，忽略请求角色 ${ROLE_NAMES[requestedRole]}`
+            : `单角色固定为 ${ROLE_NAMES[activeRole]}`,
+      };
 
       // 4. Broadcast routing info
       const routingBroadcast: RoutingBroadcast = {
@@ -378,8 +373,8 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           recentDailyLogs: [],
         };
       }
-      const contextStr = buildContextForRole(routing.primaryRole, userContext);
-      const systemPrompt = SYSTEM_PROMPTS[routing.primaryRole] + '\n\n' + contextStr;
+      const contextStr = buildContextForRole(activeRole, userContext);
+      const systemPrompt = SYSTEM_PROMPTS[activeRole] + '\n\n' + contextStr;
       const systemPromptTokens = estimateTokens(systemPrompt);
       const historyTokenBudget = Math.max(
         MIN_HISTORY_TOKEN_BUDGET,
@@ -390,16 +385,26 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const sanitizedMessages = sanitizeMessagesForLLM([...this.messages]);
       const trimmedConversation = trimConversationByTokenBudget(sanitizedMessages, historyTokenBudget);
 
-      this.broadcastCustom({ type: 'status', message: `正在呼叫【${ROLE_NAMES[routing.primaryRole]}】...` });
+      this.broadcastCustom({ type: 'status', message: `正在呼叫【${ROLE_NAMES[activeRole]}】...` });
 
       // 6. Stream response via AI SDK
-      const model = getLLMModel(this.env);
+      this.broadcastCustom({ type: 'status', message: '主链路正在判定任务复杂度...' });
+      const executionDecision = await decideExecutionMode(this.env, userText, hasImageInput);
+      const useRoleModel = executionDecision.mode === 'role';
+      const model = useRoleModel ? getRoleLLMModel(this.env) : getMainLLMModel(this.env);
+      const modelAlias = useRoleModel ? 'LLM1' : 'LLM';
+      this.broadcastCustom({
+        type: 'status',
+        message: useRoleModel
+          ? `复杂任务：已切换深度模型处理（${executionDecision.reason}）`
+          : `简单任务：主模型快速处理（${executionDecision.reason}）`,
+      });
 
       // Track whether the sync_profile tool was executed
       let toolExecuted = false;
 
       const syncProfileTool = tool({
-        description: '当识别到用户健康数据（体重、睡眠、伤病、训练目标等）时调用，将数据同步到用户档案。请在回复完用户问题后调用。',
+        description: '当识别到用户健康数据或记录类数据（体重、睡眠、伤病、训练目标、训练记录、饮食记录等）时调用，将数据同步到用户档案与记录表。请在回复完用户问题后调用。',
         inputSchema: syncProfileToolSchema,
         needsApproval: true,
         execute: async (args) => {
@@ -407,7 +412,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           try {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
             const { summary_text, ...writebackPayload } = args;
-            const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload);
+            const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
+              contextText: userText,
+            });
             const syncBroadcast: ProfileSyncResultBroadcast = {
               type: 'profile_sync_result',
               summary,
@@ -440,39 +447,14 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           // a. Save history to D1
           try {
             const metadata: Record<string, unknown> = {
-              primary_role: routing.primaryRole,
+              primary_role: activeRole,
               collaborators: routing.collaborators,
               routing_reason: routing.reason,
               architecture: 'aichat_agent_ws',
+              model_alias: modelAlias,
+              model_route: useRoleModel ? 'complex_task' : 'simple_task',
+              model_route_source: executionDecision.source,
             };
-
-            // b. Generate supplements in parallel
-            let supplements: Array<{ role: AIRole; content: string }> = [];
-            if (routing.collaborators.length > 0 && text.trim()) {
-              this.broadcastCustom({ type: 'status', message: '正在收集专家补充意见...' });
-              try {
-                supplements = await generateCollaboratorSupplements(
-                  this.env,
-                  routing.collaborators,
-                  userContext,
-                  userText,
-                  routing.primaryRole,
-                  text,
-                );
-                for (const sup of supplements) {
-                  const supBroadcast: SupplementBroadcast = {
-                    type: 'supplement',
-                    role: sup.role,
-                    role_name: ROLE_NAMES[sup.role],
-                    content: sup.content,
-                  };
-                  this.broadcastCustom(supBroadcast);
-                }
-                if (supplements.length > 0) {
-                  metadata.supplements = supplements.map((s) => ({ role: s.role, content: s.content }));
-                }
-              } catch { /* supplements are non-critical */ }
-            }
 
             await saveOrchestrateAssistantMessage(this.env.DB, userId, text, metadata);
           } catch { /* ignore save failure */ }
@@ -487,7 +469,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                 text,
               );
               if (writebackPayload) {
-                const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload);
+                const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
+                  contextText: `${userText}\n${text}`,
+                });
                 if (hasWritebackChanges(summary)) {
                   const syncBroadcast: ProfileSyncResultBroadcast = {
                     type: 'profile_sync_result',

@@ -34,10 +34,11 @@ interface UseImageAnalysisOptions {
   role: AIRole;
   buildPrompt: () => string;
   onResult: (rawText: string) => void;
+  allowProfileSync?: boolean;
 }
 
 export function useImageAnalysis(options: UseImageAnalysisOptions) {
-  const { role, buildPrompt, onResult } = options;
+  const { role, buildPrompt, onResult, allowProfileSync = false } = options;
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisText, setAnalysisText] = useState('');
   const analyzingRef = useRef(false);
@@ -78,6 +79,7 @@ export function useImageAnalysis(options: UseImageAnalysisOptions) {
           role,
           message: prompt,
           imageDataUri,
+          allowProfileSync,
           onChunk: (chunk) => {
             merged += chunk;
             setAnalysisText(merged);
@@ -95,7 +97,7 @@ export function useImageAnalysis(options: UseImageAnalysisOptions) {
       setAnalyzing(false);
       analyzingRef.current = false;
     }
-  }, [role, buildPrompt, onResult]);
+  }, [role, buildPrompt, onResult, allowProfileSync]);
 
   const pickAndAnalyze = useCallback(() => {
     if (analyzingRef.current) return;

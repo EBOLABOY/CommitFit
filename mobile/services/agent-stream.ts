@@ -8,6 +8,7 @@ type StreamSingleRoleOptions = {
   imageDataUri?: string;
   sessionId?: string;
   timeoutMs?: number;
+  allowProfileSync?: boolean;
   onChunk: (text: string) => void;
   onDone: () => void;
   onError: (err: Error) => void;
@@ -99,6 +100,7 @@ export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): P
     imageDataUri,
     sessionId = `utility-${Date.now()}`,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    allowProfileSync = false,
     onChunk,
     onDone,
     onError,
@@ -183,7 +185,7 @@ export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): P
       ],
       preferred_role: role,
       single_role: true,
-      allow_profile_sync: false,
+      allow_profile_sync: allowProfileSync,
     };
 
     try {

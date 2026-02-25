@@ -1,11 +1,14 @@
-import { memo, useState } from 'react';
-import { View, Text, TextInput, TextInputProps, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { memo, useState, useCallback } from 'react';
+import { View, Text, TextInput, TextInputProps, StyleSheet, TouchableOpacity, ActivityIndicator, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
-import { Spacing, Radius, FontSize, Shadows, HitSlop } from '../constants';
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from 'react-native-reanimated';
+import { Spacing, Radius, FontSize, Shadows, HitSlop, Gradients } from '../constants';
 import { useThemeColor } from '../hooks/useThemeColor';
 
 export * from './Skeleton';
+export { ProgressRing } from './ProgressRing';
 
 // ============ Card ============
 
@@ -18,27 +21,47 @@ interface CardProps {
 
 export function Card({ children, style, onPress, haptic = true }: CardProps) {
   const Colors = useThemeColor();
+  const scale = useSharedValue(1);
 
-  const handlePress = () => {
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    if (onPress) {
+      scale.value = withTiming(0.97, { duration: 120, easing: Easing.out(Easing.ease) });
+    }
+  }, [onPress, scale]);
+
+  const handlePressOut = useCallback(() => {
+    if (onPress) {
+      scale.value = withTiming(1, { duration: 200, easing: Easing.out(Easing.back(1.5)) });
+    }
+  }, [onPress, scale]);
+
+  const handlePress = useCallback(() => {
     if (onPress) {
       if (haptic) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       onPress();
     }
-  };
+  }, [onPress, haptic]);
 
-  const Wrapper = onPress ? TouchableOpacity : View;
   return (
-    <Wrapper
-      style={[
-        styles.card,
-        { backgroundColor: Colors.surface, shadowColor: Colors.text },
-        style
-      ]}
-      onPress={onPress ? handlePress : undefined}
-      activeOpacity={0.7}
-    >
-      {children}
-    </Wrapper>
+    <Animated.View style={animatedStyle}>
+      <Pressable
+        style={[
+          styles.card,
+          { backgroundColor: Colors.surface, shadowColor: Colors.text },
+          style
+        ]}
+        onPress={onPress ? handlePress : undefined}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        disabled={!onPress}
+      >
+        {children}
+      </Pressable>
+    </Animated.View>
   );
 }
 
@@ -448,4 +471,100 @@ const styles = StyleSheet.create({
   statValue: { fontSize: FontSize.xxl, fontWeight: '700' },
   statUnit: { fontSize: FontSize.xs, fontWeight: '400' },
   statLabel: { fontSize: FontSize.sm, fontWeight: '400' },
+});
+
+// ============ GradientButton ============
+
+interface GradientButtonProps {
+  title: string;
+  onPress: () => void;
+  icon?: keyof typeof Ionicons.glyphMap;
+  subtitle?: string;
+  loading?: boolean;
+  disabled?: boolean;
+  colors?: readonly [string, string];
+}
+
+export function GradientButton({
+  title,
+  onPress,
+  icon,
+  subtitle,
+  loading = false,
+  disabled = false,
+  colors,
+}: GradientButtonProps) {
+  const handlePress = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    onPress();
+  };
+
+  const gradientColors = colors || Gradients.hero;
+
+  return (
+    <TouchableOpacity
+      onPress={handlePress}
+      disabled={disabled || loading}
+      activeOpacity={0.85}
+      style={(disabled || loading) ? { opacity: 0.5 } : undefined}
+    >
+      <LinearGradient
+        colors={[...gradientColors]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={gradientButtonStyles.container}
+      >
+        {loading ? (
+          <ActivityIndicator color="#FFF" size="small" />
+        ) : (
+          <View style={gradientButtonStyles.inner}>
+            <View style={gradientButtonStyles.textBlock}>
+              <Text style={gradientButtonStyles.title}>{title}</Text>
+              {subtitle && <Text style={gradientButtonStyles.subtitle}>{subtitle}</Text>}
+            </View>
+            {icon && (
+              <View style={gradientButtonStyles.iconCircle}>
+                <Ionicons name={icon} size={20} color="#FFF" />
+              </View>
+            )}
+          </View>
+        )}
+      </LinearGradient>
+    </TouchableOpacity>
+  );
+}
+
+const gradientButtonStyles = StyleSheet.create({
+  container: {
+    borderRadius: Radius.xl,
+    paddingVertical: Spacing.lg,
+    paddingHorizontal: Spacing.xl,
+    ...Shadows.md,
+  },
+  inner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  textBlock: {
+    flex: 1,
+  },
+  title: {
+    fontSize: FontSize.lg,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+  subtitle: {
+    fontSize: FontSize.xs,
+    color: 'rgba(255,255,255,0.8)',
+    marginTop: 2,
+  },
+  iconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
 });

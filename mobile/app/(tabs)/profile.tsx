@@ -1,13 +1,38 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, RefreshControl, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, RefreshControl, Alert, Image, Pressable } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { api, clearToken } from '../../services/api';
+import { LinearGradient } from 'expo-linear-gradient';
+import { api, clearToken, getToken } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { ProfileData } from '../../stores/profile';
 import { Card, ListItem, Badge, SectionHeader } from '../../components/ui';
-import { Spacing, Radius, FontSize, GENDER_LABELS, EXPERIENCE_LABELS } from '../../constants';
+import { API_BASE_URL, Spacing, Radius, FontSize, Gradients, GENDER_LABELS } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
+
+function calcAgeFromBirthDate(birthDate: string): number | null {
+  // birthDate: YYYY-MM-DD
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(birthDate);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+
+  const now = new Date();
+  let age = now.getFullYear() - year;
+  const m = now.getMonth() + 1;
+  const d = now.getDate();
+  if (m < month || (m === month && d < day)) age -= 1;
+  if (age < 0 || age > 150) return null;
+  return age;
+}
+
+function formatTrainingYears(value: number): string {
+  if (!Number.isFinite(value)) return '';
+  const rounded = Math.round(value * 10) / 10;
+  const isInt = Math.abs(rounded - Math.round(rounded)) < 1e-9;
+  return isInt ? String(Math.round(rounded)) : rounded.toFixed(1);
+}
 
 export default function ProfileScreen() {
   const Colors = useThemeColor();
@@ -17,6 +42,7 @@ export default function ProfileScreen() {
   const [conditionCount, setConditionCount] = useState(0);
   const [goalCount, setGoalCount] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -36,6 +62,10 @@ export default function ProfileScreen() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    getToken().then(setToken).catch(() => setToken(null));
+  }, []);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -83,11 +113,12 @@ export default function ProfileScreen() {
 
   const profileMeta = useMemo(() => {
     const parts: string[] = [];
-    if (profile?.age) parts.push(`${profile.age}岁`);
-    if (profile?.gender) parts.push(GENDER_LABELS[profile.gender] || profile.gender);
-    if (profile?.experience_level) {
-      parts.push(EXPERIENCE_LABELS[profile.experience_level] || profile.experience_level);
+    if (profile?.birth_date) {
+      const age = calcAgeFromBirthDate(profile.birth_date);
+      if (age !== null) parts.push(`${age}岁`);
     }
+    if (profile?.gender) parts.push(GENDER_LABELS[profile.gender] || profile.gender);
+    if (profile?.training_years != null) parts.push(`训练${formatTrainingYears(profile.training_years)}年`);
     return parts.join(' · ');
   }, [profile]);
 
@@ -95,10 +126,10 @@ export default function ProfileScreen() {
     const checks = [
       { label: '身高', done: profile?.height != null },
       { label: '体重', done: profile?.weight != null },
-      { label: '年龄', done: profile?.age != null },
+      { label: '出生年月日', done: !!profile?.birth_date },
       { label: '性别', done: profile?.gender != null },
       { label: '训练目标', done: goalCount > 0 },
-      { label: '经验等级', done: !!profile?.experience_level },
+      { label: '训练年限', done: profile?.training_years != null },
     ];
 
     const doneCount = checks.filter((item) => item.done).length;
@@ -108,6 +139,23 @@ export default function ProfileScreen() {
     return { doneCount, total, percent, missing };
   }, [profile, goalCount]);
 
+  const avatarSource = useMemo(() => {
+    if (!user?.avatar_key) return null;
+    const uri = `${API_BASE_URL}/api/images/${user.avatar_key}`;
+    return token ? { uri, headers: { Authorization: `Bearer ${token}` } } : { uri };
+  }, [user?.avatar_key, token]);
+
+  const avatarInitial = useMemo(() => {
+    const n = (user?.nickname || '').trim();
+    if (n) return n.slice(0, 1);
+    return '练';
+  }, [user?.nickname]);
+
+  const ageForStats = useMemo(() => {
+    if (!profile?.birth_date) return null;
+    return calcAgeFromBirthDate(profile.birth_date);
+  }, [profile?.birth_date]);
+
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: Colors.background }]}
@@ -115,10 +163,21 @@ export default function ProfileScreen() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={Colors.primary} />}
     >
       {/* Profile Header */}
-      <View style={styles.header}>
-        <View style={[styles.avatar, { backgroundColor: Colors.primaryLight }]}>
-          <Ionicons name="person" size={36} color={Colors.primary} />
-        </View>
+      <Pressable style={styles.header} onPress={() => router.push('/profile/edit')}>
+        <LinearGradient
+          colors={[...Gradients.hero]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[styles.avatar]}
+        >
+          <View style={styles.avatarInner}>
+            {avatarSource ? (
+              <Image source={avatarSource} style={styles.avatarImage} />
+            ) : (
+              <Text style={[styles.avatarInitial, { color: Colors.primary }]}>{avatarInitial}</Text>
+            )}
+          </View>
+        </LinearGradient>
         <View style={styles.headerInfo}>
           <Text style={[styles.nickname, { color: Colors.text }]}>{user?.nickname || '健身爱好者'}</Text>
           {!!profileMeta && <Text style={[styles.metaText, { color: Colors.textSecondary }]}>{profileMeta}</Text>}
@@ -126,43 +185,46 @@ export default function ProfileScreen() {
             {goalCount > 0 && (
               <Badge label={`${goalCount} 个目标`} color={Colors.primary} />
             )}
-            {profile?.experience_level && (
-              <Badge label={EXPERIENCE_LABELS[profile.experience_level] || profile.experience_level} color={Colors.info} />
+            {profile?.training_years != null && (
+              <Badge label={`训练 ${formatTrainingYears(profile.training_years)} 年`} color={Colors.info} />
             )}
           </View>
         </View>
-      </View>
+      </Pressable>
 
       {profileCompleteness.percent < 100 && (
-      <View style={[styles.completenessCard, { backgroundColor: Colors.surface, borderColor: Colors.borderLight }]}>
-        <View style={styles.completenessHeader}>
-          <Text style={[styles.completenessTitle, { color: Colors.text }]}>档案完整度</Text>
-          <Text style={[styles.completenessPercent, { color: Colors.primary }]}>{profileCompleteness.percent}%</Text>
+        <View style={[styles.completenessCard, { backgroundColor: Colors.surface, borderColor: Colors.borderLight }]}>
+          <View style={styles.completenessHeader}>
+            <Text style={[styles.completenessTitle, { color: Colors.text }]}>档案完整度</Text>
+            <Text style={[styles.completenessPercent, { color: Colors.primary }]}>{profileCompleteness.percent}%</Text>
+          </View>
+          <View style={[styles.progressTrack, { backgroundColor: Colors.borderLight }]}>
+            <View style={[styles.progressFill, { backgroundColor: Colors.primary, width: `${profileCompleteness.percent}%` }]} />
+          </View>
+          <Text style={[styles.completenessDesc, { color: Colors.textSecondary }]}>
+            已完成 {profileCompleteness.doneCount}/{profileCompleteness.total} 项，完善档案可提升 AI 推荐准确度。
+          </Text>
+          <View style={styles.chipRow}>
+            {profileCompleteness.missing.map((item) => (
+              <View key={item} style={[styles.chip, { backgroundColor: Colors.warningLight }]}>
+                <Text style={[styles.chipText, { color: Colors.warning }]}>{item}待完善</Text>
+              </View>
+            ))}
+          </View>
         </View>
-        <View style={[styles.progressTrack, { backgroundColor: Colors.borderLight }]}>
-          <View style={[styles.progressFill, { backgroundColor: Colors.primary, width: `${profileCompleteness.percent}%` }]} />
-        </View>
-        <Text style={[styles.completenessDesc, { color: Colors.textSecondary }]}>
-          已完成 {profileCompleteness.doneCount}/{profileCompleteness.total} 项，完善档案可提升 AI 推荐准确度。
-        </Text>
-        <View style={styles.chipRow}>
-          {profileCompleteness.missing.map((item) => (
-            <View key={item} style={[styles.chip, { backgroundColor: Colors.warningLight }]}>
-              <Text style={[styles.chipText, { color: Colors.warning }]}>{item}待完善</Text>
-            </View>
-          ))}
-        </View>
-      </View>
       )}
 
       {/* Stats */}
       {profile && (profile.height || profile.weight) && (
-        <View style={[styles.statsCard, { backgroundColor: Colors.surface }]}>
+        <LinearGradient
+          colors={[...Gradients.card, 'transparent']}
+          style={[styles.statsCard]}
+        >
           {[
             { label: '身高', value: profile.height, unit: 'cm' },
             { label: '体重', value: profile.weight, unit: 'kg' },
             { label: 'BMI', value: bmi, unit: '' },
-            { label: '年龄', value: profile.age, unit: '岁' },
+            { label: '年龄', value: ageForStats, unit: '岁' },
           ].map((item, i, arr) => (
             <View key={item.label} style={styles.statItemWrap}>
               <View style={styles.statItem}>
@@ -177,7 +239,7 @@ export default function ProfileScreen() {
               {i < arr.length - 1 && <View style={[styles.statDivider, { backgroundColor: Colors.borderLight }]} />}
             </View>
           ))}
-        </View>
+        </LinearGradient>
       )}
 
       {/* Data Management */}
@@ -193,19 +255,27 @@ export default function ProfileScreen() {
         />
         <View style={[styles.divider, { backgroundColor: Colors.borderLight }]} />
         <ListItem
-          icon="body"
-          iconColor={Colors.primary}
-          title="身体数据"
-          subtitle="身高、体重、年龄等"
-          onPress={() => router.push('/profile/body-data')}
-        />
-        <View style={[styles.divider, { backgroundColor: Colors.borderLight }]} />
-        <ListItem
           icon="analytics"
           iconColor={Colors.danger}
           title="理化指标"
           subtitle="血液检查、血压、血脂等"
           onPress={() => router.push('/profile/health-metrics')}
+        />
+        <View style={[styles.divider, { backgroundColor: Colors.borderLight }]} />
+        <ListItem
+          icon="restaurant"
+          iconColor={Colors.success}
+          title="饮食方案"
+          subtitle="AI 生成的饮食结构建议"
+          onPress={() => router.push('/profile/diet-plan')}
+        />
+        <View style={[styles.divider, { backgroundColor: Colors.borderLight }]} />
+        <ListItem
+          icon="medkit"
+          iconColor={Colors.warning}
+          title="补剂方案"
+          subtitle="AI 生成的补剂与时机建议"
+          onPress={() => router.push('/profile/supplement-plan')}
         />
         <View style={[styles.divider, { backgroundColor: Colors.borderLight }]} />
         <ListItem
@@ -233,7 +303,7 @@ export default function ProfileScreen() {
           icon="restaurant"
           iconColor={Colors.success}
           title="饮食记录"
-          subtitle="AI 生成的饮食方案"
+          subtitle="每日饮食日志与营养汇总"
           onPress={() => router.push('/profile/nutrition-history')}
         />
       </Card>
@@ -283,6 +353,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  avatarInner: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  avatarImage: { width: 62, height: 62, borderRadius: 31 },
+  avatarInitial: { fontSize: 26, fontWeight: '700' },
   headerInfo: { flex: 1 },
   nickname: { fontSize: FontSize.xxl, fontWeight: '600' },
   metaText: { fontSize: FontSize.sm, marginTop: 2 },

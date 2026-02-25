@@ -21,8 +21,10 @@ export interface OrchestrateAutoWriteSummary {
   conditions_upserted: number;
   training_goals_upserted: number;
   health_metrics_created: number;
+  training_plan_created: boolean;
   nutrition_plan_created: boolean;
   supplement_plan_created: boolean;
+  diet_records_created: number;
   daily_log_upserted: boolean;
 }
 
@@ -52,20 +54,21 @@ interface RouteDecision {
 }
 
 type Gender = 'male' | 'female';
-type ExperienceLevel = 'beginner' | 'intermediate' | 'advanced';
 type Severity = 'mild' | 'moderate' | 'severe';
 type ConditionStatus = 'active' | 'recovered';
 type TrainingGoalStatus = 'active' | 'completed';
+type TrainingGoalsWriteMode = 'upsert' | 'replace_all' | 'clear_all';
 type MetricType = 'testosterone' | 'blood_pressure' | 'blood_lipids' | 'blood_sugar' | 'heart_rate' | 'body_fat' | 'other';
+type MealType = 'breakfast' | 'lunch' | 'dinner' | 'snack';
 type SleepQuality = 'good' | 'fair' | 'poor';
 
 interface ExtractedProfilePatch {
   height?: number | null;
   weight?: number | null;
-  age?: number | null;
+  birth_date?: string | null;
   gender?: Gender | null;
   training_goal?: string | null;
-  experience_level?: ExperienceLevel | null;
+  training_years?: number | null;
 }
 
 interface ExtractedCondition {
@@ -93,6 +96,25 @@ interface ExtractedPlan {
   plan_date?: string;
 }
 
+interface ExtractedTrainingPlan {
+  content?: string;
+  plan_date?: string | null;
+  notes?: string | null;
+  completed?: boolean | number | null;
+}
+
+interface ExtractedDietRecord {
+  meal_type?: MealType;
+  record_date?: string | null;
+  food_description?: string;
+  foods_json?: unknown;
+  calories?: number | null;
+  protein?: number | null;
+  fat?: number | null;
+  carbs?: number | null;
+  image_key?: string | null;
+}
+
 interface ExtractedDailyLog {
   log_date?: string | null;
   weight?: number | null;
@@ -105,9 +127,12 @@ interface ExtractedWritebackPayload {
   profile?: ExtractedProfilePatch;
   conditions?: ExtractedCondition[];
   training_goals?: ExtractedTrainingGoal[];
+  training_goals_mode?: TrainingGoalsWriteMode | null;
   health_metrics?: ExtractedMetric[];
+  training_plan?: ExtractedTrainingPlan | null;
   nutrition_plan?: ExtractedPlan | null;
   supplement_plan?: ExtractedPlan | null;
+  diet_records?: ExtractedDietRecord[];
   daily_log?: ExtractedDailyLog | null;
 }
 
@@ -153,11 +178,12 @@ const STRONG_NUTRITION_KEYWORDS = [
 
 const VALID_ROLES: AIRole[] = ['doctor', 'rehab', 'nutritionist', 'trainer'];
 const VALID_GENDER: Gender[] = ['male', 'female'];
-const VALID_EXPERIENCE: ExperienceLevel[] = ['beginner', 'intermediate', 'advanced'];
 const VALID_SEVERITY: Severity[] = ['mild', 'moderate', 'severe'];
 const VALID_STATUS: ConditionStatus[] = ['active', 'recovered'];
 const VALID_TRAINING_GOAL_STATUS: TrainingGoalStatus[] = ['active', 'completed'];
+const VALID_TRAINING_GOAL_WRITE_MODES: TrainingGoalsWriteMode[] = ['upsert', 'replace_all', 'clear_all'];
 const VALID_METRIC_TYPES: MetricType[] = ['testosterone', 'blood_pressure', 'blood_lipids', 'blood_sugar', 'heart_rate', 'body_fat', 'other'];
+const VALID_MEAL_TYPES: MealType[] = ['breakfast', 'lunch', 'dinner', 'snack'];
 const VALID_SLEEP_QUALITIES: SleepQuality[] = ['good', 'fair', 'poor'];
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -169,12 +195,91 @@ function asDateOnly(input: string | undefined): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function addDays(dateOnly: string, offsetDays: number): string {
+  const d = new Date(`${dateOnly}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function getWeekMonday(dateOnly: string): string {
+  const d = new Date(`${dateOnly}T00:00:00Z`);
+  const day = d.getUTCDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setUTCDate(d.getUTCDate() + diff);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function inferTrainingPlanDate(rawPlanDate: unknown, sourceText: string): string {
+  if (typeof rawPlanDate === 'string' && DATE_ONLY_REGEX.test(rawPlanDate)) {
+    return rawPlanDate;
+  }
+
+  const explicitDate = sourceText.match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1];
+  if (explicitDate && DATE_ONLY_REGEX.test(explicitDate)) {
+    return explicitDate;
+  }
+
+  const today = asDateOnly(undefined);
+  if (/(后天)/.test(sourceText)) return addDays(today, 2);
+  if (/(明天|明日)/.test(sourceText)) return addDays(today, 1);
+  if (/(本周|一周|7天|七天|周计划)/.test(sourceText)) return getWeekMonday(today);
+  if (/(今天|今日)/.test(sourceText)) return today;
+
+  return today;
+}
+
+function inferRecordDate(rawDate: unknown, sourceText: string): string {
+  if (typeof rawDate === 'string' && DATE_ONLY_REGEX.test(rawDate)) {
+    return rawDate;
+  }
+  const explicitDate = sourceText.match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1];
+  if (explicitDate && DATE_ONLY_REGEX.test(explicitDate)) {
+    return explicitDate;
+  }
+
+  const today = asDateOnly(undefined);
+  if (/(昨天|昨日)/.test(sourceText)) return addDays(today, -1);
+  if (/(前天)/.test(sourceText)) return addDays(today, -2);
+  if (/(后天)/.test(sourceText)) return addDays(today, 2);
+  if (/(明天|明日)/.test(sourceText)) return addDays(today, 1);
+  return today;
+}
+
 function normalizeString(value: unknown, max = 500): string | null {
   if (typeof value !== 'string') return null;
   const text = value.trim();
   if (!text) return null;
   if (text.length <= max) return text;
   return text.slice(0, max);
+}
+
+function normalizeNumber(value: unknown, min: number, max: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  if (value < min || value > max) return null;
+  return value;
+}
+
+function normalizeTrainingGoalsMode(value: unknown): TrainingGoalsWriteMode | null {
+  if (typeof value !== 'string') return null;
+  return VALID_TRAINING_GOAL_WRITE_MODES.includes(value as TrainingGoalsWriteMode)
+    ? (value as TrainingGoalsWriteMode)
+    : null;
+}
+
+function isMeaningfulTrainingGoalName(name: string): boolean {
+  const compact = name
+    .trim()
+    .toLowerCase()
+    .replace(/[\s，。！？!?,.；;:：“”"'`（）()【】\[\]{}<>]/g, '');
+
+  if (compact.length < 2) return false;
+  if (
+    /^(好|好的|ok|okay|yes|明白|收到|了解|知道了|可以|行|嗯|完成|done|已完成|已删除|已清空)$/.test(compact)
+  ) {
+    return false;
+  }
+  if (/(清空|删除|移除|重置|取消)(目标)?$/.test(compact)) return false;
+  return true;
 }
 
 function extractJsonObject(text: string): Record<string, unknown> | null {
@@ -437,9 +542,10 @@ export async function extractWritebackPayload(
   const prompt = [
     '你是结构化信息提取器。根据输入内容抽取可写回数据。',
     '仅在信息明确时填写；不明确请填 null 或空数组；禁止臆造。',
+    '当用户明确要求清空训练目标时，设置 training_goals_mode="clear_all"；若是“先清空再设置新目标”，设置 training_goals_mode="replace_all" 并填充 training_goals。',
     '必须只输出 JSON，不要 markdown，不要解释。',
     'JSON 模板：',
-    '{"profile":{"height":null,"weight":null,"age":null,"gender":null,"training_goal":null,"experience_level":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"training_goals":[{"name":"","description":null,"status":"active"}],"health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"nutrition_plan":{"content":"","plan_date":null},"supplement_plan":{"content":"","plan_date":null},"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null}}',
+    '{"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"nutrition_plan":{"content":"","plan_date":null},"supplement_plan":{"content":"","plan_date":null},"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null}}',
     '',
     `用户最新问题：${message}`,
     historyText ? `近期对话：\n${historyText}` : '近期对话：无',
@@ -490,8 +596,48 @@ function parseTrainingGoalName(source: string): string | null {
     const match = source.match(pattern);
     if (!match?.[1]) continue;
     const normalized = normalizeString(match[1], 100);
-    if (normalized) return normalized;
+    if (!normalized) continue;
+    if (/(清空|删除|移除|重置|取消)/.test(normalized)) continue;
+    if (!isMeaningfulTrainingGoalName(normalized)) continue;
+    return normalized;
   }
+  return null;
+}
+
+function hasClearTrainingGoalsIntent(message: string): boolean {
+  const normalized = message.replace(/\s+/g, '');
+  if (/(不要|别|无需|不用|暂不).*(清空|删除|移除|重置)/.test(normalized)) return false;
+  return /(清空|删除|移除|重置).*(训练目标|目标)/.test(normalized)
+    || /(训练目标|目标).*(清空|删除|移除|重置)/.test(normalized);
+}
+
+function getTrainingGoalMergeKey(name: string): string {
+  const compact = name.trim().toLowerCase().replace(/\s+/g, '');
+  if (!compact) return '';
+
+  if (/(增肌|增重|长肌|肌肉增长|肌肥大)/.test(compact)) return 'goal:muscle_gain';
+  if (/(减脂|减重|减肥|瘦身|降脂|控脂)/.test(compact)) return 'goal:fat_loss';
+  if (/(力量|爆发力|最大力量|卧推|深蹲|硬拉)/.test(compact)) return 'goal:strength';
+  if (/(耐力|有氧|心肺|跑步|马拉松)/.test(compact)) return 'goal:endurance';
+  if (/(康复|恢复|伤病|疼痛缓解)/.test(compact)) return 'goal:rehab';
+  if (/(体态|柔韧|灵活|活动度)/.test(compact)) return 'goal:mobility';
+
+  return `goal:${compact}`;
+}
+
+function looksLikeTrainingPlanText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const hasPlanKeyword = /(训练计划|周计划|今日训练|明日训练|热身|正式训练|静态放松|动作|组数|次数|rpe)/i.test(text);
+  const hasStructuredHeading = /^##\s+/m.test(text) || /^###\s+/m.test(text);
+  const hasSetRepPattern = /(\d+\s*[x×*]\s*\d+|\d+\s*组|\d+\s*次)/i.test(normalized);
+  return hasPlanKeyword && (hasStructuredHeading || hasSetRepPattern);
+}
+
+function inferMealTypeFromText(text: string): MealType | null {
+  if (/(早餐|早饭|早晨)/.test(text)) return 'breakfast';
+  if (/(午餐|午饭|中饭)/.test(text)) return 'lunch';
+  if (/(晚餐|晚饭|晚食)/.test(text)) return 'dinner';
+  if (/(加餐|零食|夜宵)/.test(text)) return 'snack';
   return null;
 }
 
@@ -507,12 +653,21 @@ function hasMeaningfulObjectValue(value: unknown): boolean {
 function normalizeWritebackPayload(payload: ExtractedWritebackPayload | null | undefined): ExtractedWritebackPayload | null {
   if (!payload) return null;
   const normalized: ExtractedWritebackPayload = {};
+  const trainingGoalsMode = normalizeTrainingGoalsMode(payload.training_goals_mode);
+
   if (hasMeaningfulObjectValue(payload.profile)) normalized.profile = payload.profile;
   if (Array.isArray(payload.conditions) && payload.conditions.length > 0) normalized.conditions = payload.conditions;
-  if (Array.isArray(payload.training_goals) && payload.training_goals.length > 0) normalized.training_goals = payload.training_goals;
+  if (Array.isArray(payload.training_goals) && payload.training_goals.length > 0) {
+    normalized.training_goals = payload.training_goals;
+    normalized.training_goals_mode = trainingGoalsMode ?? 'upsert';
+  } else if (trainingGoalsMode) {
+    normalized.training_goals_mode = trainingGoalsMode;
+  }
   if (Array.isArray(payload.health_metrics) && payload.health_metrics.length > 0) normalized.health_metrics = payload.health_metrics;
+  if (hasMeaningfulObjectValue(payload.training_plan)) normalized.training_plan = payload.training_plan;
   if (hasMeaningfulObjectValue(payload.nutrition_plan)) normalized.nutrition_plan = payload.nutrition_plan;
   if (hasMeaningfulObjectValue(payload.supplement_plan)) normalized.supplement_plan = payload.supplement_plan;
+  if (Array.isArray(payload.diet_records) && payload.diet_records.length > 0) normalized.diet_records = payload.diet_records;
   if (hasMeaningfulObjectValue(payload.daily_log)) normalized.daily_log = payload.daily_log;
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
@@ -525,10 +680,10 @@ function mergeProfilePatch(
   return {
     height: primary?.height ?? fallback?.height,
     weight: primary?.weight ?? fallback?.weight,
-    age: primary?.age ?? fallback?.age,
+    birth_date: primary?.birth_date ?? fallback?.birth_date,
     gender: primary?.gender ?? fallback?.gender,
     training_goal: primary?.training_goal ?? fallback?.training_goal,
-    experience_level: primary?.experience_level ?? fallback?.experience_level,
+    training_years: primary?.training_years ?? fallback?.training_years,
   };
 }
 
@@ -555,22 +710,46 @@ function mergeWritebackPayload(
   if (!normalizedPrimary) return normalizedFallback;
   if (!normalizedFallback) return normalizedPrimary;
 
+  const primaryTrainingGoals =
+    Array.isArray(normalizedPrimary.training_goals) && normalizedPrimary.training_goals.length > 0
+      ? normalizedPrimary.training_goals
+      : undefined;
+  const fallbackTrainingGoals =
+    Array.isArray(normalizedFallback.training_goals) && normalizedFallback.training_goals.length > 0
+      ? normalizedFallback.training_goals
+      : undefined;
+  const primaryTrainingGoalsMode = normalizeTrainingGoalsMode(normalizedPrimary.training_goals_mode);
+  const fallbackTrainingGoalsMode = normalizeTrainingGoalsMode(normalizedFallback.training_goals_mode);
+  let mergedTrainingGoalsMode: TrainingGoalsWriteMode | null = primaryTrainingGoalsMode ?? fallbackTrainingGoalsMode;
+  if (fallbackTrainingGoalsMode === 'clear_all') {
+    mergedTrainingGoalsMode = 'clear_all';
+  } else if (fallbackTrainingGoalsMode === 'replace_all' && !primaryTrainingGoals) {
+    mergedTrainingGoalsMode = 'replace_all';
+  }
+  const mergedTrainingGoals =
+    mergedTrainingGoalsMode === 'clear_all'
+      ? undefined
+      : (primaryTrainingGoals ?? fallbackTrainingGoals);
+
   const merged: ExtractedWritebackPayload = {
     profile: mergeProfilePatch(normalizedPrimary.profile, normalizedFallback.profile),
     conditions:
       Array.isArray(normalizedPrimary.conditions) && normalizedPrimary.conditions.length > 0
         ? normalizedPrimary.conditions
         : normalizedFallback.conditions,
-    training_goals:
-      Array.isArray(normalizedPrimary.training_goals) && normalizedPrimary.training_goals.length > 0
-        ? normalizedPrimary.training_goals
-        : normalizedFallback.training_goals,
+    training_goals: mergedTrainingGoals,
+    training_goals_mode: mergedTrainingGoalsMode,
     health_metrics:
       Array.isArray(normalizedPrimary.health_metrics) && normalizedPrimary.health_metrics.length > 0
         ? normalizedPrimary.health_metrics
         : normalizedFallback.health_metrics,
+    training_plan: normalizedPrimary.training_plan ?? normalizedFallback.training_plan,
     nutrition_plan: normalizedPrimary.nutrition_plan ?? normalizedFallback.nutrition_plan,
     supplement_plan: normalizedPrimary.supplement_plan ?? normalizedFallback.supplement_plan,
+    diet_records:
+      Array.isArray(normalizedPrimary.diet_records) && normalizedPrimary.diet_records.length > 0
+        ? normalizedPrimary.diet_records
+        : normalizedFallback.diet_records,
     daily_log: mergeDailyLog(normalizedPrimary.daily_log, normalizedFallback.daily_log),
   };
 
@@ -580,11 +759,43 @@ function mergeWritebackPayload(
 function extractWritebackPayloadByRules(message: string, answer: string): ExtractedWritebackPayload | null {
   const source = `${message}\n${answer}`;
   const payload: ExtractedWritebackPayload = {};
+  const shouldClearGoals = hasClearTrainingGoalsIntent(message);
+  if (shouldClearGoals) {
+    payload.training_goals_mode = 'clear_all';
+  }
 
   const goalName = parseTrainingGoalName(source);
   if (goalName) {
     payload.profile = { training_goal: goalName };
     payload.training_goals = [{ name: goalName, description: null, status: 'active' }];
+    if (payload.training_goals_mode === 'clear_all') {
+      payload.training_goals_mode = 'replace_all';
+    }
+  }
+
+  if (looksLikeTrainingPlanText(answer)) {
+    const content = normalizeString(answer, 12000);
+    if (content) {
+      payload.training_plan = {
+        content,
+        plan_date: inferTrainingPlanDate(undefined, source),
+        notes: null,
+        completed: false,
+      };
+    }
+  }
+
+  const mealType = inferMealTypeFromText(message);
+  const consumedSignal = /(我.*(吃了|吃的|吃过|喝了|刚吃|刚喝)|早餐是|午餐是|晚餐是|加餐是)/.test(message);
+  if (mealType && consumedSignal) {
+    const foodDescription = normalizeString(message, 1000);
+    if (foodDescription) {
+      payload.diet_records = [{
+        meal_type: mealType,
+        record_date: inferRecordDate(undefined, source),
+        food_description: foodDescription,
+      }];
+    }
   }
 
   const weight = parseNumberByPatterns(
@@ -631,8 +842,10 @@ export function hasWritebackChanges(summary: OrchestrateAutoWriteSummary): boole
     summary.conditions_upserted > 0 ||
     summary.training_goals_upserted > 0 ||
     summary.health_metrics_created > 0 ||
+    summary.training_plan_created ||
     summary.nutrition_plan_created ||
     summary.supplement_plan_created ||
+    summary.diet_records_created > 0 ||
     summary.daily_log_upserted
   );
 }
@@ -657,7 +870,15 @@ export async function resolveWritebackPayload(
   }
 
   const rulePayload = extractWritebackPayloadByRules(message, answer);
-  const mergedPayload = mergeWritebackPayload(llmPayload, rulePayload);
+  let mergedPayload = mergeWritebackPayload(llmPayload, rulePayload);
+
+  const clearIntent = hasClearTrainingGoalsIntent(message);
+  const explicitGoalInMessage = parseTrainingGoalName(message);
+  if (clearIntent && !explicitGoalInMessage) {
+    mergedPayload = mergedPayload ?? {};
+    mergedPayload.training_goals_mode = 'clear_all';
+    delete mergedPayload.training_goals;
+  }
 
   return {
     payload: mergedPayload,
@@ -679,17 +900,22 @@ async function applyProfilePatch(db: D1Database, userId: string, patch: Extracte
     fields.push('weight = ?');
     values.push(patch.weight);
   }
-  if (typeof patch.age === 'number' && Number.isFinite(patch.age) && patch.age >= 1 && patch.age <= 150) {
-    fields.push('age = ?');
-    values.push(Math.round(patch.age));
+  if (typeof patch.birth_date === 'string' && DATE_ONLY_REGEX.test(patch.birth_date)) {
+    fields.push('birth_date = ?');
+    values.push(patch.birth_date);
   }
   if (typeof patch.gender === 'string' && VALID_GENDER.includes(patch.gender as Gender)) {
     fields.push('gender = ?');
     values.push(patch.gender);
   }
-  if (typeof patch.experience_level === 'string' && VALID_EXPERIENCE.includes(patch.experience_level as ExperienceLevel)) {
-    fields.push('experience_level = ?');
-    values.push(patch.experience_level);
+  if (
+    typeof patch.training_years === 'number' &&
+    Number.isFinite(patch.training_years) &&
+    patch.training_years >= 0 &&
+    patch.training_years <= 80
+  ) {
+    fields.push('training_years = ?');
+    values.push(Number(patch.training_years.toFixed(1)));
   }
   if (typeof patch.training_goal === 'string') {
     const trainingGoal = normalizeString(patch.training_goal, 200);
@@ -758,43 +984,93 @@ async function applyConditions(db: D1Database, userId: string, rawConditions: Ex
 async function applyTrainingGoals(
   db: D1Database,
   userId: string,
-  rawGoals: ExtractedTrainingGoal[] | undefined
+  rawGoals: ExtractedTrainingGoal[] | undefined,
+  mode: TrainingGoalsWriteMode | null | undefined
 ): Promise<number> {
-  if (!Array.isArray(rawGoals) || rawGoals.length === 0) return 0;
+  const normalizedMode: TrainingGoalsWriteMode = normalizeTrainingGoalsMode(mode) ?? 'upsert';
   const seen = new Set<string>();
-  let upserted = 0;
+  const candidates: Array<{
+    name: string;
+    dedupeKey: string;
+    description: string | null;
+    status: TrainingGoalStatus | null;
+  }> = [];
 
-  for (const item of rawGoals.slice(0, 5)) {
+  for (const item of (Array.isArray(rawGoals) ? rawGoals : []).slice(0, 5)) {
     const name = normalizeString(item?.name, 100);
     if (!name) continue;
-    const dedupeKey = name.toLowerCase();
+    if (!isMeaningfulTrainingGoalName(name)) continue;
+    const dedupeKey = getTrainingGoalMergeKey(name);
+    if (!dedupeKey) continue;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
     const description = item?.description == null ? null : normalizeString(item.description, 500);
     const status = typeof item?.status === 'string' && VALID_TRAINING_GOAL_STATUS.includes(item.status as TrainingGoalStatus)
-      ? item.status
-      : 'active';
+      ? (item.status as TrainingGoalStatus)
+      : null;
+    candidates.push({ name, dedupeKey, description, status });
+  }
 
-    const existing = await db.prepare(
-      'SELECT id FROM training_goals WHERE user_id = ? AND lower(name) = lower(?) LIMIT 1'
-    )
-      .bind(userId, name)
-      .first<{ id: string }>();
+  const existingCountRow = await db.prepare(
+    'SELECT COUNT(1) as total FROM training_goals WHERE user_id = ?'
+  ).bind(userId).first<{ total: number | string | null }>();
+  const existingCount = Number(existingCountRow?.total ?? 0);
 
-    if (existing?.id) {
+  if (normalizedMode === 'clear_all') {
+    if (existingCount <= 0) return 0;
+    await db.prepare('DELETE FROM training_goals WHERE user_id = ?').bind(userId).run();
+    return existingCount;
+  }
+
+  if (normalizedMode === 'replace_all') {
+    const statements = [db.prepare('DELETE FROM training_goals WHERE user_id = ?').bind(userId)];
+    for (const item of candidates) {
+      const id = crypto.randomUUID();
+      statements.push(
+        db.prepare(
+          'INSERT INTO training_goals (id, user_id, name, description, status) VALUES (?, ?, ?, ?, ?)'
+        ).bind(id, userId, item.name, item.description, item.status || 'active')
+      );
+    }
+    await db.batch(statements);
+    if (candidates.length > 0) return candidates.length;
+    return existingCount;
+  }
+
+  if (candidates.length === 0) return 0;
+  let upserted = 0;
+
+  const existingGoalsResult = await db.prepare(
+    'SELECT id, name FROM training_goals WHERE user_id = ? ORDER BY created_at DESC'
+  ).bind(userId).all<{ id: string; name: string }>();
+  const existingByKey = new Map<string, { id: string }>();
+  for (const row of existingGoalsResult.results || []) {
+    if (!row?.id || !row?.name) continue;
+    const key = getTrainingGoalMergeKey(row.name);
+    if (!key) continue;
+    if (!existingByKey.has(key)) {
+      existingByKey.set(key, { id: row.id });
+    }
+  }
+
+  for (const item of candidates) {
+    const existing = existingByKey.get(item.dedupeKey) || null;
+
+    if (existing) {
       await db.prepare(
-        'UPDATE training_goals SET description = ?, status = ? WHERE id = ? AND user_id = ?'
+        'UPDATE training_goals SET name = ?, description = COALESCE(?, description), status = COALESCE(?, status) WHERE id = ? AND user_id = ?'
       )
-        .bind(description, status, existing.id, userId)
+        .bind(item.name, item.description, item.status, existing.id, userId)
         .run();
     } else {
       const id = crypto.randomUUID();
       await db.prepare(
         'INSERT INTO training_goals (id, user_id, name, description, status) VALUES (?, ?, ?, ?, ?)'
       )
-        .bind(id, userId, name, description, status)
+        .bind(id, userId, item.name, item.description, item.status || 'active')
         .run();
+      existingByKey.set(item.dedupeKey, { id });
     }
 
     upserted += 1;
@@ -834,6 +1110,101 @@ async function applyHealthMetrics(db: D1Database, userId: string, rawMetrics: Ex
       'INSERT INTO health_metrics (id, user_id, metric_type, value, unit, recorded_at) VALUES (?, ?, ?, ?, ?, ?)'
     )
       .bind(id, userId, metricType, valueText, unit, recordedAt)
+      .run();
+
+    created += 1;
+  }
+
+  return created;
+}
+
+async function applyTrainingPlan(
+  db: D1Database,
+  userId: string,
+  plan: ExtractedTrainingPlan | null | undefined,
+  contextText?: string
+): Promise<boolean> {
+  if (!plan || typeof plan !== 'object') return false;
+
+  const content = normalizeString(plan.content, 12000);
+  if (!content || content.length < 12) return false;
+
+  const planDate = inferTrainingPlanDate(plan.plan_date, `${contextText || ''}\n${content}`);
+  const notes = plan.notes == null ? null : normalizeString(plan.notes, 500);
+  const completed = plan.completed === true || plan.completed === 1 ? 1 : 0;
+
+  // 同一天只保留一份计划，遵循 /api/training 的行为
+  await db.prepare('DELETE FROM training_plans WHERE user_id = ? AND plan_date = ?')
+    .bind(userId, planDate)
+    .run();
+
+  const id = crypto.randomUUID();
+  await db.prepare(
+    'INSERT INTO training_plans (id, user_id, plan_date, content, completed, notes) VALUES (?, ?, ?, ?, ?, ?)'
+  )
+    .bind(id, userId, planDate, content, completed, notes)
+    .run();
+
+  return true;
+}
+
+async function applyDietRecords(
+  db: D1Database,
+  userId: string,
+  rawRecords: ExtractedDietRecord[] | undefined,
+  contextText?: string
+): Promise<number> {
+  if (!Array.isArray(rawRecords) || rawRecords.length === 0) return 0;
+
+  let created = 0;
+  const seen = new Set<string>();
+
+  for (const item of rawRecords.slice(0, 8)) {
+    if (!item || typeof item !== 'object') continue;
+
+    const mealType =
+      typeof item.meal_type === 'string' && VALID_MEAL_TYPES.includes(item.meal_type as MealType)
+        ? (item.meal_type as MealType)
+        : null;
+    if (!mealType) continue;
+
+    const foodDescription = normalizeString(item.food_description, 1000);
+    if (!foodDescription) continue;
+    const recordDate = inferRecordDate(item.record_date, `${contextText || ''}\n${foodDescription}`);
+
+    const dedupeKey = `${mealType}|${recordDate}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    let foodsJson: string | null = null;
+    if (typeof item.foods_json === 'string') {
+      foodsJson = normalizeString(item.foods_json, 8000);
+    } else if (item.foods_json !== undefined && item.foods_json !== null) {
+      try {
+        foodsJson = normalizeString(JSON.stringify(item.foods_json), 8000);
+      } catch {
+        foodsJson = null;
+      }
+    }
+
+    const calories = normalizeNumber(item.calories, 0, 10000);
+    const protein = normalizeNumber(item.protein, 0, 2000);
+    const fat = normalizeNumber(item.fat, 0, 2000);
+    const carbs = normalizeNumber(item.carbs, 0, 2000);
+    const imageKey = item.image_key == null ? null : normalizeString(item.image_key, 512);
+
+    // AI 写回采用“同日同餐替换”策略，避免同一餐生成多个冲突记录
+    await db.prepare(
+      'DELETE FROM diet_records WHERE user_id = ? AND meal_type = ? AND record_date = ?'
+    )
+      .bind(userId, mealType, recordDate)
+      .run();
+
+    const id = crypto.randomUUID();
+    await db.prepare(
+      'INSERT INTO diet_records (id, user_id, meal_type, record_date, food_description, foods_json, calories, protein, fat, carbs, image_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+      .bind(id, userId, mealType, recordDate, foodDescription, foodsJson, calories, protein, fat, carbs, imageKey)
       .run();
 
     created += 1;
@@ -925,15 +1296,18 @@ async function applyDailyLog(
 export async function applyAutoWriteback(
   db: D1Database,
   userId: string,
-  extracted: ExtractedWritebackPayload | null
+  extracted: ExtractedWritebackPayload | null,
+  options?: { contextText?: string | null }
 ): Promise<OrchestrateAutoWriteSummary> {
   const summary: OrchestrateAutoWriteSummary = {
     profile_updated: false,
     conditions_upserted: 0,
     training_goals_upserted: 0,
     health_metrics_created: 0,
+    training_plan_created: false,
     nutrition_plan_created: false,
     supplement_plan_created: false,
+    diet_records_created: 0,
     daily_log_upserted: false,
   };
 
@@ -941,10 +1315,19 @@ export async function applyAutoWriteback(
 
   summary.profile_updated = await applyProfilePatch(db, userId, extracted.profile);
   summary.conditions_upserted = await applyConditions(db, userId, extracted.conditions);
-  summary.training_goals_upserted = await applyTrainingGoals(db, userId, extracted.training_goals);
+  summary.training_goals_upserted = await applyTrainingGoals(
+    db,
+    userId,
+    extracted.training_goals,
+    extracted.training_goals_mode
+  );
   summary.health_metrics_created = await applyHealthMetrics(db, userId, extracted.health_metrics);
+  const contextText = typeof options?.contextText === 'string' ? options.contextText : '';
+
+  summary.training_plan_created = await applyTrainingPlan(db, userId, extracted.training_plan, contextText);
   summary.nutrition_plan_created = await applyNutritionPlan(db, userId, extracted.nutrition_plan, 'nutrition');
   summary.supplement_plan_created = await applyNutritionPlan(db, userId, extracted.supplement_plan, 'supplement');
+  summary.diet_records_created = await applyDietRecords(db, userId, extracted.diet_records, contextText);
   summary.daily_log_upserted = await applyDailyLog(db, userId, extracted.daily_log);
 
   return summary;
@@ -1049,15 +1432,19 @@ export async function runAutoOrchestrate(params: OrchestrateParams): Promise<Orc
     conditions_upserted: 0,
     training_goals_upserted: 0,
     health_metrics_created: 0,
+    training_plan_created: false,
     nutrition_plan_created: false,
     supplement_plan_created: false,
+    diet_records_created: 0,
     daily_log_upserted: false,
   };
 
   if (autoWriteback) {
     try {
       const { payload, extractionError } = await resolveWritebackPayload(env, message, normalizedHistory, finalAnswer);
-      updateSummary = await applyAutoWriteback(env.DB, userId, payload);
+      updateSummary = await applyAutoWriteback(env.DB, userId, payload, {
+        contextText: `${message}\n${finalAnswer}`,
+      });
 
       const isWritebackFailed = Boolean(extractionError) && !hasWritebackChanges(updateSummary);
       if (isWritebackFailed) {
