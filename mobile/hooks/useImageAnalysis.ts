@@ -4,11 +4,10 @@ import * as ImagePicker from 'expo-image-picker';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as Haptics from 'expo-haptics';
 import Toast from 'react-native-toast-message';
-import { api, streamChat } from '../services/api';
+import { streamSingleRoleAgent } from '../services/agent-stream';
 import type { AIRole } from '../../shared/types';
 
 const MAX_IMAGE_DIMENSION = 1600;
-const INLINE_THRESHOLD = 500 * 1024;
 
 export function parseAIJson<T>(raw: string): T | null {
   const candidates: string[] = [];
@@ -70,36 +69,22 @@ export function useImageAnalysis(options: UseImageAnalysisOptions) {
         return;
       }
 
-      let imageOption: { inline: string } | { key: string };
-      if (resized.base64.length < INLINE_THRESHOLD) {
-        imageOption = { inline: `data:image/jpeg;base64,${resized.base64}` };
-      } else {
-        try {
-          const uploadRes = await api.uploadImage(resized.uri);
-          if (uploadRes.success && uploadRes.data?.key) {
-            imageOption = { key: uploadRes.data.key };
-          } else {
-            imageOption = { inline: `data:image/jpeg;base64,${resized.base64}` };
-          }
-        } catch {
-          imageOption = { inline: `data:image/jpeg;base64,${resized.base64}` };
-        }
-      }
+      const imageDataUri = `data:image/jpeg;base64,${resized.base64}`;
 
       const prompt = buildPrompt();
       const rawText = await new Promise<string>((resolve, reject) => {
         let merged = '';
-        streamChat(
+        void streamSingleRoleAgent({
           role,
-          prompt,
-          (chunk) => {
+          message: prompt,
+          imageDataUri,
+          onChunk: (chunk) => {
             merged += chunk;
             setAnalysisText(merged);
           },
-          () => resolve(merged),
-          (err) => reject(err),
-          imageOption
-        );
+          onDone: () => resolve(merged),
+          onError: (err) => reject(err),
+        });
       });
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

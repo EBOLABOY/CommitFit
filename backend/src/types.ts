@@ -4,6 +4,7 @@ export type Bindings = {
   DB: D1Database;
   KV: KVNamespace;
   R2: R2Bucket;
+  SupervisorAgent: DurableObjectNamespace;
   LLM_MODEL: string;
   LLM_FALLBACK_MODELS?: string;
   LLM_BASE_URL: string;

@@ -1,8 +1,11 @@
-# LangGraph Supervisor Multi-Agent 重构计划 (移动端适配版)
+# Cloudflare Agents SDK Supervisor Multi-Agent 架构文档
+
+> 最后更新：2026-02-25
+> 原始文档由 AI 辅助生成，已根据实际实现校正。
 
 ## 0. 背景与核心愿景
 当前《练了码》的移动端 AI 咨询系统已具备良好的交互体验，但随着业务复杂度增加，单体/简单路由的模型已无法满足长期运动档案管理、多角色协作（医生、康复师、营养师）的深度需求。
-本计划旨在以后端 **LangGraph** 为核心骨架，构建一套**「图状态机核心 + 旁路记忆更新 + 前端流式透传」**的顶级工业级架构，将移动端彻底解放为纯粹的“渲染引擎”。
+本架构以后端 **Cloudflare Agents SDK** 为核心骨架，构建一套**「Durable Objects 状态机核心 + D1 双写审计 + 前端流式透传」**的架构，将移动端彻底解放为纯粹的"渲染引擎"。
 
 ---
 
@@ -10,113 +13,167 @@
 
 ```mermaid
 graph TD
-    A[移动端 App - ai.tsx] -->|WebSocket / SSE Request| B(Cloudflare Workers / Hono.js Gateway)
-    B --> C{LangGraph Supervisor}
-    
-    subgraph LangGraph State Machine
-        C -->|决策: 需要康复干预| D[Rehab Specialist]
-        C -->|决策: 需要训练计划| E[Fitness Trainer]
-        C -->|并发提取/静默更新| F[Profile Manager]
+    A[移动端 App - ai.tsx] -->|WebSocket| B(Cloudflare Workers / Hono Gateway)
+    B --> C{SupervisorAgent DO}
+
+    subgraph Cloudflare Durable Objects
+        C -->|路由分发 + 角色 System Prompt| D[streamText - AI SDK]
+        C -->|并行: 协作者补充意见| E[generateCollaboratorSupplements]
+        C -->|Tool Calling: sync_profile| F[applyAutoWriteback]
     end
-    
-    D -.->|Stream Events 透传| A
-    E -.->|Stream Events 透传| A
-    F -->|Tool Calling| G[(Cloudflare D1 / Drizzle)]
-    F -.->|UI Event: 同步完成| A
-    
-    G -.->|State 载入| C
+
+    D -.->|WebSocket UIMessageStream| A
+    E -.->|Custom Broadcast: supplement| A
+    F -->|D1 写入| H[(Cloudflare D1)]
+    C -->|D1 双写: saveOrchestrateHistory| H
+    C -->|DO 内置 SQLite 持久化| I[(DO SQLite)]
+```
+
+### 关键设计决策
+- **单 SupervisorAgent DO 内聚所有角色**：不再为每个专科角色创建独立 DO（Specialist Agent DO 已在 v2 迁移中删除），路由决策和角色切换在 SupervisorAgent 内完成
+- **双轨持久化**：D1 用于审计/BI/REST 历史，DO SQLite 用于实时多设备同步
+- **不使用 Drizzle ORM**：直接使用 D1 原生 SQL，不在当前迁移范围
+
+---
+
+## 2. 后端 Agents 核心设计 (Backend Agents Definition)
+
+### 2.1 技术栈 (Tech Stack)
+*   **后端语言**：TypeScript
+*   **Web 框架**：Hono.js + `hono-agents` 中间件 (无状态入口，路由到对应 DO)
+*   **Agent 编排**：`@cloudflare/ai-chat` (`AIChatAgent` 基类) + `agents` SDK
+*   **AI 调用**：Vercel AI SDK (`ai` 包) — `streamText()`, `convertToModelMessages()`, `tool()`
+*   **LLM 适配**：`@ai-sdk/openai-compatible` (连接 `https://api.izlx.de/v1`)
+*   **状态持久化**：
+    - Durable Objects 内置 SQLite（AIChatAgent 自动管理）
+    - Cloudflare D1（审计/BI/REST 历史）
+
+### 2.2 核心 Agent 设计 (Core Agents)
+
+#### SupervisorAgent — 路由大脑 + 专科执行 ✅
+*   **继承**：`AIChatAgent<Bindings>` (来自 `@cloudflare/ai-chat`)
+*   **职责**：
+    1. WebSocket JWT 认证 (`onConnect`)
+    2. 意图路由：关键词 + LLM 双路由，决定 primaryRole + collaborators
+    3. 构建角色专属 System Prompt + 用户上下文
+    4. `streamText()` 流式生成主回答
+    5. `generateCollaboratorSupplements()` 并行生成补充意见
+    6. `sync_profile` Tool Calling + `needsApproval: true` (Human-in-the-loop)
+    7. `saveOrchestrateHistory()` D1 双写
+
+### 2.3 已删除的 Agent
+
+以下 Specialist Agent DO 在 v2_remove_specialists 迁移中删除：
+- ~~TrainerSpecialistAgent~~
+- ~~RehabSpecialistAgent~~
+- ~~NutritionistSpecialistAgent~~
+- ~~DoctorSpecialistAgent~~
+- ~~ProfileManagerAgent~~
+
+**删除原因**：角色切换和写回在 SupervisorAgent 内聚处理，未接入主链路的独立 DO 已清理，降低运行与维护复杂度。
+
+---
+
+## 3. 前后端通信协议 (Protocol & Streaming)
+
+### 3.1 WebSocket 连接
+
+```
+连接地址：wss://api-lite.izlx.de5.net/agents/supervisor-agent/{userId}?token={jwt}&sid={sessionId}
+```
+
+通过 `hono-agents` 中间件自动路由到对应的 Durable Object 实例。
+
+### 3.2 事件协议 (Event Payloads)
+
+#### AIChatAgent 内置协议
+
+| 类型 | 方向 | 用途 |
+|------|------|------|
+| `cf_agent_use_chat_request` | 客户端→服务端 | 发送用户消息（UIMessage 格式） |
+| `cf_agent_use_chat_response` | 服务端→客户端 | 流式回复（UIMessageStream 分块：text-delta, text-start, text-end, tool-approval-request, error, finish 等） |
+| `cf_agent_chat_messages` | 服务端→客户端 | DO 持久化消息广播（重连恢复/多设备同步） |
+| `cf_agent_chat_clear` | 客户端→服务端 | 清空 DO 持久化消息 |
+| `cf_agent_tool_approval` | 客户端→服务端 | 用户审批工具调用 |
+
+#### 自定义广播事件 (broadcastCustom)
+
+*   **Type: `status`** — 渲染前端状态提示
+    *   `{"type": "status", "message": "正在分析问题并分配专家..."}`
+    *   `{"type": "status", "message": "正在呼叫【康复师】..."}`
+*   **Type: `routing`** — 路由决策结果
+    *   `{"type": "routing", "primary_role": "rehab", "primary_role_name": "康复师", "collaborators": [...], "reason": "..."}`
+*   **Type: `supplement`** — 协作者补充意见
+    *   `{"type": "supplement", "role": "nutritionist", "role_name": "营养师", "content": "建议补充鱼油以减缓炎症..."}`
+*   **Type: `profile_sync_result`** — 档案同步结果
+    *   `{"type": "profile_sync_result", "summary": { "profile_updated": true, "conditions_upserted": 1, ... }}`
+
+---
+
+## 4. 移动端应用层 (Mobile Client)
+
+### 4.1 当前架构
+
+*   **统一入口**：`app/(tabs)/ai.tsx` — 唯一的 AI 对话界面，纯 WebSocket，无 REST 历史加载
+*   **WebSocket 管理**：`hooks/useAgentChat.ts` — 自定义 Hook，管理 WebSocket 连接、消息收发、流式渲染
+*   **单次任务流**：`services/agent-stream.ts` — 首页训练计划、饮食分析、图片识别统一走 WS 单次请求
+*   **无独立 chat store**：消息状态完全由 `useAgentChat` 内部 `useState` 管理，不经过 Zustand
+*   **消息来源**：首屏消息完全来自 WS `cf_agent_chat_messages`（DO 重连广播），按 ID 去重合并
+*   **4 个 Tab**：首页、AI 咨询、营养、我的
+
+> **注意**：`api.ts` 中 SSE 流代码已下线，AI 统一通过 WS 协议收发。
+
+### 4.2 UI 渲染分发
+
+| 事件 | 渲染行为 |
+|------|---------|
+| `status` | 显示在流式气泡底部的状态文字 |
+| `routing` | 助手消息上方的角色标签 (彩色圆点 + 角色名) |
+| `cf_agent_use_chat_response` (text-delta) | Markdown 打字机效果渲染 |
+| `supplement` | 助手消息下方的补充意见卡片（左边框 = 角色色） |
+| `profile_sync_result` | 底部绿色横幅："已同步：身体档案、伤病记录 1 条" |
+| `tool-approval-request` | 模态弹窗："确认同步数据？" + 确认/取消按钮 |
+
+### 4.3 设计系统
+
+```
+品牌色：#FF6B35 (珊瑚橙)
+角色色：
+  - 运动医生：#DC2626 (红)
+  - 康复师：#0EA5E9 (天空蓝)
+  - 营养师：#16A34A (翡翠绿)
+  - 私人教练：#FF6B35 (珊瑚橙)
 ```
 
 ---
 
-## 2. 阶段一：后端 LangGraph 核心图谱构建 (Backend Graph Definition)
-**目标**：在后端（强烈推荐 **TypeScript + Hono.js + Cloudflare Workers**）使用 `@langchain/langgraph` 定义明确的状态节点（Nodes）和边（Edges）。
+## 5. 实施状态 (Implementation Status)
 
-### 2.1 推荐技术栈 (Tech Stack)
-*   **后端语言**：TypeScript (无缝衔接现有系统与 Drizzle ORM 代码)
-*   **Web 框架**：Hono.js (专为 Edge Runtime 打造，原生支持 Cloudflare Workers 和高性能 SSE 发送)
-*   **Agent 编排**：`@langchain/langgraph` (与 Python 版核心概念 100% 对齐)
-*   **可观测性**：LangSmith (必接，用于追踪多 Agent 调用链路与延迟)
+### 里程碑 1：最小化 Agent PoC ✅
+1. ✅ 安装依赖：`agents@latest`, `@cloudflare/ai-chat@latest`, `hono-agents`
+2. ✅ 配置 `wrangler.toml` Durable Objects 绑定
+3. ✅ SupervisorAgent 继承 `AIChatAgent`，实现 `onChatMessage` + JWT `onConnect`
+4. ✅ Hono 入口通过 `agentsMiddleware()` 路由到 Agent DO
 
-### 2.2 定义全局状态 (Graph State)
-定义每次会话通过图流转的共享状态字典。
-*   `messages`：对话历史（包含 Tool Messages）。
-*   `user_profile`：用户当前的结构化档案（身高、体重、伤病词典），在对话初始阶段从 DB 注入。
-*   `next_representative`：当前指定的下一级处理 Agent，由 Supervisor 决定。
+### 里程碑 2：多角色协作 ✅
+1. ✅ Supervisor 内部智能路由（关键词 + LLM 双路由）
+2. ✅ 协作者补充意见并行生成
+3. ✅ 自定义广播事件（routing, supplement, status, profile_sync_result）
+4. ✅ 移动端 `useAgentChat` 接入 WebSocket 协议
 
-### 2.3 核心节点设计 (Core Nodes)
-1.  **Supervisor Node (路由大脑)**
-    *   **实现建议**：基于官方推荐的 "Agents as Tools" 或 Multi-Agent Supervisor 模式构建。
-    *   **职责**：纯分类器，低延迟。阅读用户最后一条输入和 Profile，决定调用的下游节点。
-    *   **输出**：`{ "next": "Rehab", "reason": "用户提及膝盖疼痛" }`。
-2.  **Specialist Nodes (垂类专家如 Trainer, Rehab)**
-    *   **职责**：携带严苛的 System Prompt 进行专业解答。
-    *   **动作**：生成的结果**直接向前端抛出流片段 (Token stream)**，不需要 Supervisor 组装。
-3.  **Profile Manager Node (记忆提取器 - 关键创新)**
-    *   **架构亮点**：利用 LangGraph 原生的 parallel execution (并行节点) 发送机制，作为旁路节点运行，绝不阻塞主干对话的文字生成。
-    *   **动作**：监听已完成的对话轮次，利用 Structured Output 和 Tool Calling 操作 Cloudflare D1 (复用现有 Drizzle ORM 配置)。
-    *   **边界**：若发现致命伤病（如骨折）变更，可通过向 State 写入 `interrupt_signal` 触发前端弹窗强确认 (Human-in-the-Loop)。
+### 里程碑 3：Tool Calling + Human-in-the-loop ✅
+1. ✅ `sync_profile` 工具定义 + `needsApproval: true`
+2. ✅ 前端 Tool Approval 弹窗
+3. ✅ D1 写回 + 审计日志
 
----
+### 里程碑 4：消息持久化统一 ✅
+1. ✅ D1 双写保留（审计/BI 数据源，SupervisorAgent `onFinish` 中 `saveOrchestrateHistory`）
+2. ✅ `cf_agent_chat_messages` 前端处理（`useAgentChat.ts` 已解析 + ID 去重合并）
+3. ✅ `ai.tsx` 已切换为纯 WebSocket — 不再走 REST 历史加载，首屏消息来自 DO 重连广播
+4. ✅ 首页训练计划 / 饮食分析 / 图片识别已迁移到 `streamSingleRoleAgent`，协议收敛为 WS 单协议
 
-## 3. 阶段二：前后端通信协议改造 (Protocol & Streaming)
-**目标**：从单维度的纯文本流（Text Stream）跨越到多路复用的**事件流（Event-Driven SSE Server）**。
+### 待完善
 
-### 3.1 Edge Runtime SSE 流式输出
-利用 `@langchain/langgraph` 的 `streamEvents({ version: 'v2' })` 捕获底层细节，通过 Hono.js 的 `streamSSE` 转化为 JSON Lines 格式吐出。完美兼容 Cloudflare Workers 的网络生命周期。
-
-### 3.2 定义多维事件包 (Event Payloads)
-
-*   **Type: `status`** (渲染前端顶部提示条，类似 Cursor)
-    *   `{"type": "status", "agent": "Supervisor", "data": "正在评估您的关节情况..."}`
-    *   `{"type": "status", "agent": "Rehab", "data": "正在调取运动康复医学文献..."}`
-*   **Type: `primary_stream`** (渲染主聊天气泡)
-    *   `{"type": "primary_stream", "data": "关于您的膝盖，我建议..."}`
-*   **Type: `profile_sync`** (渲染档案写回成功的静默横幅)
-    *   `{"type": "profile_sync", "data": { "part": "右膝", "status": "新增疼痛" }}`
-*   **Type: `supplementary_card`** (渲染其他专家的补充意见面板)
-    *   `{"type": "supplementary_card", "agent": "Nutritionist", "data": "建议补充鱼油以减缓炎症..."}`
-
----
-
-## 4. 阶段三：移动端应用层适配 (Mobile Client Refactor)
-**目标**：前端 (`app/(tabs)/ai.tsx` 及 `stores/chat.ts`) 大幅瘦身，化身为纯粹的状态机视图分发器。
-
-### 4.1 瘦客户端改造 (Fat Backend, Thin Client)
-*   **合并 UI**：移除分散的 Role 切换。全站业务统一收口至 `ai.tsx`，打造类似 Apple Intelligence 的统一唤起界面。
-*   **引入标准 SSE 库**：放弃手写 Chunk reader，引入 `react-native-sse` 或 `EventSource` polyfill 处理服务端推送，获得自动重连与心跳保活能力。
-*   **清理冗余逻辑**：删除前端复杂的失败重试、图片 Base64 降级代码，这类逻辑全部上移交给后端的 Cloudflare 网关处理。
-
-### 4.2 动效与分发渲染 (UI/UX Dispatcher)
-*   监听 SSE 的 `status` 事件流，配合 `react-native-reanimated` 渲染动态步骤呼吸灯。
-*   监听到 `primary_stream`，驱动 Markdown 快速打字机渲染。
-*   监听到 `profile_sync` 事件时，无需拉回全量数据，仅在顶部弹出 `writebackBanner` 气泡提示“已更新档案”，配合 `expo-haptics` 震动反馈。
-
----
-
-## 5. 阶段四：渐进式落地路线图 (Implementation Roadmap)
-
-### 里程碑 1：后端图引擎初始化 (Week 1)
-1. 搭建基础的 TypeScript + Hono.js 脚手架，安装 `@langchain/langgraph`。
-2. 接入 LangSmith，用于后续监控。
-3. 构建 `Supervisor` 节点并硬编码打通 `Trainer` 节点，跑通最简单的分类和传递。
-4. 在 Cloudflare Workers 环境下构建 Hono 的 SSE 接口，透传 `streamEvents` 数据流。
-
-### 里程碑 2：前后端流式联调 (Week 2)
-1. 彻底改造移动端，引入 `react-native-sse`，抛弃旧的 `api.streamChat`。
-2. 移动端 UI 增加对于 `status` 步骤事件的动态视觉渲染（如打点器或横向滚动进度）。
-3. 实盘测试单角色的透传流渲染以及首字节响应时间 (TTFB) 监控。
-
-### 里程碑 3：攻坚 Profile Manager 与图状态 (Week 3)
-1. 设计独立并行的 `Profile Manager` 节点。
-2. 复用现有的 Drizzle ORM + D1 数据更新逻辑，在 TS 端封装为给 Profile Manager 调用的 Tools。
-3. 注入长程持久化 Checkpointer（接入 `@langchain/langgraph-checkpoint` 的 KV 或 SQLite 实现），让对话断点恢复和演进周期在后端长期保存。
-
-### 里程碑 4：多角色扩展与 UI 终态 (Week 4)
-1. 接入 `Rehab`、`Nutritionist` 节点，跑通图内的角色交接与挂件式 (Widget) Supplementary Card 返回。
-2. 前端根据 `supplementary_card` 类型渲染底部的折叠面板。
-3. 对接医疗审计合规所需的日志记录，加入必要的确认弹窗 (Human-in-the-loop)。
-4. 全面移除 `app/chat/[role].tsx` 以及过时的路由组件，完成最终代码清洗。
-
----
-*Generated by Google Antigravity Architecture Agent*
+**其他**
+- ❌ 自动化测试
+- ❌ Drizzle ORM 迁移

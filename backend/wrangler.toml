@@ -1,6 +1,7 @@
 name = "lianlema-backend"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 routes = [
@@ -29,3 +30,34 @@ id = "5fd36595d91e42a5b629fa4a541754ea"
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "lianlema-images"
+
+[durable_objects]
+bindings = [
+  { name = "SupervisorAgent", class_name = "SupervisorAgent" }
+]
+
+[[migrations]]
+tag = "v1_agents_sdk"
+new_sqlite_classes = [
+  "SupervisorAgent",
+  "TrainerSpecialistAgent",
+  "RehabSpecialistAgent",
+  "NutritionistSpecialistAgent",
+  "DoctorSpecialistAgent",
+  "ProfileManagerAgent"
+]
+
+[[migrations]]
+tag = "v2_remove_specialists"
+deleted_classes = [
+  "TrainerSpecialistAgent",
+  "RehabSpecialistAgent",
+  "NutritionistSpecialistAgent",
+  "DoctorSpecialistAgent"
+]
+
+[[migrations]]
+tag = "v3_remove_profile_manager"
+deleted_classes = [
+  "ProfileManagerAgent"
+]

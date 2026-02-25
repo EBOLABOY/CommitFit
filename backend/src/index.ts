@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { agentsMiddleware } from 'hono-agents';
 import type { Bindings, Variables } from './types';
 import { authRoutes } from './routes/auth';
 import { profileRoutes } from './routes/profile';
@@ -7,11 +8,11 @@ import { healthRoutes } from './routes/health';
 import { conditionsRoutes } from './routes/conditions';
 import { trainingRoutes } from './routes/training';
 import { nutritionRoutes } from './routes/nutrition';
-import { aiRoutes } from './routes/ai';
 import { imageRoutes } from './routes/images';
 import { dietRoutes } from './routes/diet';
 import { dailyLogRoutes } from './routes/daily-logs';
 import { trainingGoalRoutes } from './routes/training-goals';
+import { SupervisorAgent } from './agents/supervisor-agent';
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -40,6 +41,8 @@ app.use(
   })
 );
 
+app.use('/agents/*', agentsMiddleware());
+
 app.get('/', (c) => c.json({ message: '练了码 API v1' }));
 
 app.route('/api/auth', authRoutes);
@@ -48,10 +51,12 @@ app.route('/api/health', healthRoutes);
 app.route('/api/conditions', conditionsRoutes);
 app.route('/api/training', trainingRoutes);
 app.route('/api/nutrition', nutritionRoutes);
-app.route('/api/ai', aiRoutes);
 app.route('/api/images', imageRoutes);
 app.route('/api/diet', dietRoutes);
 app.route('/api/daily-logs', dailyLogRoutes);
 app.route('/api/training-goals', trainingGoalRoutes);
 
 export default app;
+export {
+  SupervisorAgent,
+};

@@ -207,6 +207,73 @@ export interface SSESupplementEvent {
   content: string;
 }
 
+// ============ Cloudflare Agents Event Protocol ============
+
+export type AgentStreamEventType =
+  | 'status'
+  | 'primary_stream'
+  | 'profile_sync'
+  | 'supplementary_card'
+  | 'error'
+  | 'done';
+
+export interface AgentStatusEventPayload {
+  type: 'status';
+  agent: string;
+  data: string;
+}
+
+export interface AgentPrimaryStreamEventPayload {
+  type: 'primary_stream';
+  agent: string;
+  data: string;
+}
+
+export interface AgentProfileSyncPayload {
+  part: string;
+  status: string;
+  summary?: OrchestrateAutoWriteSummary | null;
+  interrupt_signal?: string | null;
+}
+
+export interface AgentProfileSyncEventPayload {
+  type: 'profile_sync';
+  agent: string;
+  data: AgentProfileSyncPayload;
+}
+
+export interface AgentSupplementaryCardPayload {
+  role: AIRole;
+  role_name: string;
+  data: string;
+}
+
+export interface AgentSupplementaryCardEventPayload {
+  type: 'supplementary_card';
+  agent: string;
+  data: AgentSupplementaryCardPayload;
+}
+
+export interface AgentErrorEventPayload {
+  type: 'error';
+  agent: string;
+  data: string;
+}
+
+export interface AgentDoneEventPayload {
+  type: 'done';
+  agent: string;
+  data: null;
+}
+
+export type AgentStreamEventPayload =
+  | AgentStatusEventPayload
+  | AgentPrimaryStreamEventPayload
+  | AgentProfileSyncEventPayload
+  | AgentSupplementaryCardEventPayload
+  | AgentErrorEventPayload
+  | AgentDoneEventPayload;
+
 export interface OrchestrateChatResponse {
   answer: string;
   primary_role: AIRole;
@@ -224,6 +291,45 @@ export interface WritebackAudit {
   error: string | null;
   message_excerpt: string | null;
   created_at: string;
+}
+
+// ============ WebSocket Events (AIChatAgent) ============
+
+export interface WSRoutingEvent {
+  type: 'routing';
+  primary_role: AIRole;
+  primary_role_name: string;
+  collaborators: Array<{ role: AIRole; role_name: string }>;
+  reason: string;
+}
+
+export interface WSSupplementEvent {
+  type: 'supplement';
+  role: AIRole;
+  role_name: string;
+  content: string;
+}
+
+export interface WSStatusEvent {
+  type: 'status';
+  message: string;
+}
+
+export interface WSProfileSyncResultEvent {
+  type: 'profile_sync_result';
+  summary: OrchestrateAutoWriteSummary;
+}
+
+export type WSCustomEvent =
+  | WSRoutingEvent
+  | WSSupplementEvent
+  | WSStatusEvent
+  | WSProfileSyncResultEvent;
+
+export interface ToolApprovalRequest {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
 }
 
 // ============ API Response ============

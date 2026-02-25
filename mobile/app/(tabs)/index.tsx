@@ -19,7 +19,8 @@ import { useProfileStore } from '../../stores/profile';
 import { SectionHeader, Card, Badge, Skeleton } from '../../components/ui';
 import { Spacing, Radius, FontSize, Shadows } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import { streamChat, api } from '../../services/api';
+import { api } from '../../services/api';
+import { streamSingleRoleAgent } from '../../services/agent-stream';
 import { parseContent } from '../../utils';
 import { WeightChartModal } from '../../components/WeightChartModal';
 import type { TrainingPlan, DietRecord, MealType, DailyLog } from '../../../shared/types';
@@ -271,14 +272,14 @@ export default function HomeScreen() {
     streamContentRef.current = '';
     setExpanded(new Set());
 
-    streamChat(
-      'trainer',
-      PLAN_PROMPT,
-      (chunk) => {
+    void streamSingleRoleAgent({
+      role: 'trainer',
+      message: PLAN_PROMPT,
+      onChunk: (chunk) => {
         streamContentRef.current += chunk;
         setStreamContent(streamContentRef.current);
       },
-      async () => {
+      onDone: async () => {
         const content = streamContentRef.current;
         try {
           const res = await api.createTrainingPlan({
@@ -293,10 +294,10 @@ export default function HomeScreen() {
         }
         setIsGenerating(false);
       },
-      () => {
+      onError: () => {
         setIsGenerating(false);
-      }
-    );
+      },
+    });
   }, [isGenerating, todayDateStr, fetchTrainingOverview]);
 
   const handleComplete = useCallback(() => {

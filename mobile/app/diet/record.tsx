@@ -21,12 +21,12 @@ import * as Haptics from 'expo-haptics';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { Spacing, Radius, FontSize, Shadows } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import { api, streamChat } from '../../services/api';
+import { api } from '../../services/api';
+import { streamSingleRoleAgent } from '../../services/agent-stream';
 import { Card } from '../../components/ui';
 import type { MealType, FoodAnalysisResult, FoodItem } from '../../../shared/types';
 
 const MAX_IMAGE_DIMENSION = 1600;
-const INLINE_THRESHOLD = 500 * 1024;
 
 const MEAL_OPTIONS: { value: MealType; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: 'breakfast', label: '早餐', icon: 'sunny-outline' },
@@ -215,37 +215,24 @@ export default function DietRecordScreen() {
     try {
       const prompt = buildDietAnalysisPrompt(inputMode, description);
 
-      let imageOption: { inline: string } | { key: string } | undefined;
+      let imageDataUri: string | undefined;
       if (inputMode === 'photo') {
         if (!pendingImage) return;
-        if (pendingImage.base64.length < INLINE_THRESHOLD) {
-          imageOption = { inline: `data:image/jpeg;base64,${pendingImage.base64}` };
-        } else {
-          try {
-            const uploadRes = await api.uploadImage(pendingImage.uri);
-            if (uploadRes.success && uploadRes.data?.key) {
-              imageOption = { key: uploadRes.data.key };
-            } else {
-              imageOption = { inline: `data:image/jpeg;base64,${pendingImage.base64}` };
-            }
-          } catch {
-            imageOption = { inline: `data:image/jpeg;base64,${pendingImage.base64}` };
-          }
-        }
+        imageDataUri = `data:image/jpeg;base64,${pendingImage.base64}`;
       }
 
       const aiRawText = await new Promise<string>((resolve, reject) => {
         let merged = '';
-        streamChat(
-          'nutritionist',
-          prompt,
-          (chunk) => {
+        void streamSingleRoleAgent({
+          role: 'nutritionist',
+          message: prompt,
+          imageDataUri,
+          onChunk: (chunk) => {
             merged += chunk;
           },
-          () => resolve(merged),
-          (err) => reject(err),
-          imageOption
-        );
+          onDone: () => resolve(merged),
+          onError: (err) => reject(err),
+        });
       });
 
       const parsed = parseFoodAnalysisResult(aiRawText);

@@ -958,13 +958,30 @@ export async function saveOrchestrateHistory(
   imageUrl: string | null,
   metadata?: Record<string, unknown> | null
 ): Promise<void> {
+  await saveOrchestrateUserMessage(db, userId, userMessage, imageUrl);
+  await saveOrchestrateAssistantMessage(db, userId, answer, metadata);
+}
+
+export async function saveOrchestrateUserMessage(
+  db: D1Database,
+  userId: string,
+  userMessage: string,
+  imageUrl: string | null
+): Promise<void> {
   const userIdRow = crypto.randomUUID();
   await db.prepare(
     'INSERT INTO chat_history (id, user_id, role, message_role, content, image_url) VALUES (?, ?, ?, ?, ?, ?)'
   )
     .bind(userIdRow, userId, 'orchestrator', 'user', userMessage, imageUrl)
     .run();
+}
 
+export async function saveOrchestrateAssistantMessage(
+  db: D1Database,
+  userId: string,
+  answer: string,
+  metadata?: Record<string, unknown> | null
+): Promise<void> {
   const assistantId = crypto.randomUUID();
   const metadataJson = metadata ? JSON.stringify(metadata) : null;
   await db.prepare(

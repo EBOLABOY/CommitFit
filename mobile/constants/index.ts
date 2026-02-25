@@ -2,6 +2,9 @@ export const API_BASE_URL = __DEV__
   ? 'https://api-lite.izlx.de5.net'
   : 'https://api-lite.izlx.de5.net';
 
+// Agents/PartyServer 路由使用 Durable Object 绑定名的 kebab-case
+export const SUPERVISOR_AGENT_NAMESPACE = 'supervisor-agent';
+
 // ============ Design Tokens ============
 
 export const LightColors = {
