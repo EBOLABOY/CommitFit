@@ -667,9 +667,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
             const ageYears = calcAgeYears(birthDate);
 
             const goals = Array.isArray(userContext.trainingGoals)
-              ? userContext.trainingGoals.slice(0, 6).map((g) => {
+              ? userContext.trainingGoals.slice(0, 4).map((g) => {
                 const name = truncate((g as Record<string, unknown>).name, 80);
-                const desc = truncate((g as Record<string, unknown>).description, 280);
+                const desc = truncate((g as Record<string, unknown>).description, 2000);
                 return desc ? `${name}：${desc}` : name;
               }).filter(Boolean)
               : [];
@@ -678,7 +678,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               ? userContext.conditions.slice(0, 6).map((c) => {
                 const name = truncate((c as Record<string, unknown>).name, 80);
                 const severity = truncate((c as Record<string, unknown>).severity, 20);
-                const desc = truncate((c as Record<string, unknown>).description, 220);
+                const desc = truncate((c as Record<string, unknown>).description, 1200);
                 const sev = severity ? `（${severity}）` : '';
                 return desc ? `${name}${sev}：${desc}` : `${name}${sev}`;
               }).filter(Boolean)
