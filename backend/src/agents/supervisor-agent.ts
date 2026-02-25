@@ -374,12 +374,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       }
       const contextStr = buildContextForRole(activeRole, userContext);
       const architectureGuidanceLines: string[] = [
-        '架构约束（重要）：',
-        '1) 你是主助理，始终使用主模型进行对话与流式输出。',
-        '2) 当用户要求【生成/制定/安排】训练计划、饮食方案、补剂方案，或进行图片识别/分析时：必须先调用 delegate_generate 获取内容，再基于返回内容组织最终答复。',
-        '3) 当用户要求对数据进行增删改查时：可以先调用 query_user_data（只读）拿到 id，再用 sync_profile 生成写回草稿（Local-First）。',
-        '4) 写回必须来自用户原话/对话事实，禁止把“好的/已记录/明白了”等客套话写入任何字段。清空请使用 *_mode=\"clear_all\"。',
-        '5) 严禁操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
+        '架构要点：主模型负责对话与工具编排；计划/方案/图片分析优先 delegate_generate；CRUD 可 query_user_data 后 sync_profile 生成草稿；禁止账号/密码类操作；禁止把客套话写入数据。',
       ];
       if (hasImageInput && userImageUrl) {
         architectureGuidanceLines.push(`本次输入包含图片 URL：${userImageUrl}`);
@@ -585,6 +580,42 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         ].join('\n'),
         inputSchema: delegateGenerateToolSchema,
         execute: async (args) => {
+          const truncate = (value: unknown, max = 500): string => {
+            const text = typeof value === 'string' ? value : '';
+            const clean = text.trim();
+            if (!clean) return '';
+            return clean.length <= max ? clean : `${clean.slice(0, max)}...(已截断)`;
+          };
+
+          const toDateOnlyUTC = (d: Date): string => d.toISOString().slice(0, 10);
+
+          const dateDaysAgoUTC = (days: number): string => {
+            const ms = Date.now() - days * 24 * 60 * 60 * 1000;
+            return toDateOnlyUTC(new Date(ms));
+          };
+
+          const calcAgeYears = (birthDate: unknown): number | null => {
+            if (typeof birthDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) return null;
+            const [y, m, d] = birthDate.split('-').map((v) => Number(v));
+            if (!y || !m || !d) return null;
+            const now = new Date();
+            let age = now.getUTCFullYear() - y;
+            const mm = now.getUTCMonth() + 1;
+            const dd = now.getUTCDate();
+            if (mm < m || (mm === m && dd < d)) age -= 1;
+            return Number.isFinite(age) && age >= 0 && age <= 120 ? age : null;
+          };
+
+          const formatMealType = (value: unknown): string => {
+            switch (value) {
+              case 'breakfast': return '早餐';
+              case 'lunch': return '午餐';
+              case 'dinner': return '晚餐';
+              case 'snack': return '加餐';
+              default: return '未知';
+            }
+          };
+
           try {
             const kind = args.kind;
             const roleRaw = (args as Record<string, unknown>).role;
@@ -606,25 +637,131 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                     : '分析';
             this.broadcastCustom({ type: 'status', message: `正在委托深度生成器：${kindLabel}...` });
 
-            const delegateContext = buildContextForRole(delegateRole, userContext);
+            // 只在委托生成时补充更丰富的用户事实（避免放大主链路 prompt）。
+            const since30 = dateDaysAgoUTC(30);
+            const since7 = dateDaysAgoUTC(7);
+
+            const [weightsRes, plansRes, dietRes, supplementRes] = await Promise.all([
+              this.env.DB
+                .prepare('SELECT log_date, weight FROM daily_logs WHERE user_id = ? AND log_date >= ? AND weight IS NOT NULL ORDER BY log_date DESC LIMIT 40')
+                .bind(userId, since30)
+                .all(),
+              this.env.DB
+                .prepare('SELECT plan_date, content, notes, completed FROM training_plans WHERE user_id = ? AND plan_date >= ? ORDER BY plan_date DESC LIMIT 14')
+                .bind(userId, since7)
+                .all(),
+              this.env.DB
+                .prepare('SELECT record_date, meal_type, food_description, calories, protein, fat, carbs FROM diet_records WHERE user_id = ? AND record_date >= ? ORDER BY record_date DESC, meal_type ASC LIMIT 80')
+                .bind(userId, since7)
+                .all(),
+              this.env.DB
+                .prepare("SELECT plan_date, content FROM nutrition_plans WHERE user_id = ? AND content LIKE '【补剂方案】%' ORDER BY plan_date DESC LIMIT 2")
+                .bind(userId)
+                .all(),
+            ]);
+
+            const profile = userContext.profile && typeof userContext.profile === 'object' ? userContext.profile : null;
+            const birthDate = profile ? (profile.birth_date as unknown) : null;
+            const gender = profile ? (profile.gender as unknown) : null;
+            const genderZh = gender === 'male' ? '男' : gender === 'female' ? '女' : '未填';
+            const ageYears = calcAgeYears(birthDate);
+
+            const goals = Array.isArray(userContext.trainingGoals)
+              ? userContext.trainingGoals.slice(0, 6).map((g) => {
+                const name = truncate((g as Record<string, unknown>).name, 80);
+                const desc = truncate((g as Record<string, unknown>).description, 280);
+                return desc ? `${name}：${desc}` : name;
+              }).filter(Boolean)
+              : [];
+
+            const conditions = Array.isArray(userContext.conditions)
+              ? userContext.conditions.slice(0, 6).map((c) => {
+                const name = truncate((c as Record<string, unknown>).name, 80);
+                const severity = truncate((c as Record<string, unknown>).severity, 20);
+                const desc = truncate((c as Record<string, unknown>).description, 220);
+                const sev = severity ? `（${severity}）` : '';
+                return desc ? `${name}${sev}：${desc}` : `${name}${sev}`;
+              }).filter(Boolean)
+              : [];
+
+            const weights = (weightsRes.results || [])
+              .map((r) => r as Record<string, unknown>)
+              .filter((r) => typeof r.log_date === 'string' && typeof r.weight === 'number')
+              .slice(0, 31)
+              .reverse()
+              .map((r) => `${r.log_date}:${(r.weight as number).toFixed(1)}kg`)
+              .join('，');
+
+            const recentPlans = (plansRes.results || [])
+              .map((r) => r as Record<string, unknown>)
+              .filter((r) => typeof r.plan_date === 'string')
+              .slice(0, 7)
+              .map((r) => {
+                const d = r.plan_date as string;
+                const done = r.completed === 1 || r.completed === true ? '已完成' : '未完成';
+                const summary = truncate(r.content, 320);
+                return `- ${d}（${done}）：${summary}`;
+              })
+              .join('\n');
+
+            const dietByDate = new Map<string, Array<Record<string, unknown>>>();
+            for (const row of (dietRes.results || []) as Array<Record<string, unknown>>) {
+              const d = typeof row.record_date === 'string' ? row.record_date : null;
+              if (!d) continue;
+              const arr = dietByDate.get(d) ?? [];
+              arr.push(row);
+              dietByDate.set(d, arr);
+            }
+            const dietDates = Array.from(dietByDate.keys()).sort().reverse().slice(0, 7);
+            const recentDiet = dietDates.map((d) => {
+              const items = dietByDate.get(d) ?? [];
+              const parts = items.slice(0, 6).map((it) => {
+                const meal = formatMealType(it.meal_type);
+                const desc = truncate(it.food_description, 120);
+                return desc ? `${meal}:${desc}` : meal;
+              }).filter(Boolean);
+              return `- ${d}：${parts.join(' | ')}`;
+            }).join('\n');
+
+            const supplementPlans = (supplementRes.results || [])
+              .map((r) => r as Record<string, unknown>)
+              .filter((r) => typeof r.plan_date === 'string' && typeof r.content === 'string')
+              .slice(0, 2)
+              .map((r) => `- ${r.plan_date}：${truncate(r.content, 600)}`)
+              .join('\n');
+
+            const userFactsLines: string[] = [
+              '用户信息（供生成参考，缺失项可忽略）：',
+              profile
+                ? [
+                  `- 年龄：${ageYears ?? '未知'}${ageYears != null ? '岁' : ''}`,
+                  `- 性别：${genderZh}`,
+                  `- 身高：${typeof profile.height === 'number' ? `${profile.height}cm` : '未填'}`,
+                  `- 训练年限：${typeof profile.training_years === 'number' ? `${profile.training_years}年` : '未填'}`,
+                ].join('\n')
+                : '- 身体基础信息：未填写',
+              goals.length > 0 ? `- 目标：\n${goals.map((g) => `  - ${g}`).join('\n')}` : '- 目标：未设置',
+              conditions.length > 0 ? `- 伤病：\n${conditions.map((c) => `  - ${c}`).join('\n')}` : '- 伤病：无/未记录',
+              weights ? `- 近30天体重（日志）：${weights}` : '- 近30天体重（日志）：无',
+              recentPlans ? `- 近7天训练计划（摘要）：\n${recentPlans}` : '- 近7天训练计划：无',
+              recentDiet ? `- 近7天饮食（摘要）：\n${recentDiet}` : '- 近7天饮食：无',
+              supplementPlans ? `- 最近补剂方案（如有）：\n${supplementPlans}` : '- 最近补剂方案：无',
+            ];
+
             const delegateSystem = [
-              SYSTEM_PROMPTS[delegateRole],
-              delegateContext,
-              [
-                '你是一个被主助理调用的“深度生成器”（工具执行）。',
-                '只输出最终内容本身，不要输出任何客套话、确认语、解释、免责声明。',
-                '输出必须是中文，使用 Markdown，结构清晰，便于直接保存。',
-                '若信息不足，优先列出 3-6 个必须澄清的问题，并给出一个最小可行版本（保守、安全）。',
-                '严格遵守用户安全红线与禁忌；对疼痛/伤病要给替代动作与风险提示（简短）。',
-              ].join('\n'),
-            ].join('\n\n');
+              // 不复用长角色 prompt，减少限制与 token 占用，让模型更主动。
+              kind === 'nutrition_plan' || kind === 'supplement_plan' ? '你是运动营养与补剂规划专家。' :
+                kind === 'training_plan' ? '你是力量与体能训练教练。' :
+                  '你是运动健康分析顾问。',
+              '你被主助理以工具形式调用。只输出最终内容（中文 Markdown），不要客套话，不要解释过程，不要提及工具/模型/调用。',
+              '优先利用用户信息生成更贴合的方案；信息不足时提出少量关键问题，同时给出一个可执行的最小版本。',
+            ].join('\n');
 
             const kindRequirements =
               kind === 'training_plan'
                 ? [
                   '生成训练计划：包含 热身/主训练/辅助/拉伸恢复；给出组数×次数×强度（RPE或重量区间）；',
                   '如用户给出“今天/明天/本周/一周”，请在正文中显式写明对应的日期或范围；',
-                  '必须遵守“体重<100kg前严禁双脚离地跳跃”等安全红线（如上下文存在）。',
                 ].join('\n')
                 : kind === 'nutrition_plan'
                   ? [
@@ -645,6 +782,8 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               `角色视角：${ROLE_NAMES[delegateRole]}`,
               planDateHint ? `计划日期（如适用）：${planDateHint}` : null,
               imageUrlRaw ? `图片URL：${imageUrlRaw}` : null,
+              '',
+              userFactsLines.join('\n'),
               '',
               '用户请求：',
               args.request,
