@@ -422,7 +422,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
           switch (args.resource) {
             case 'user': {
-              const user = await this.env.DB.prepare('SELECT id, email, nickname, avatar_key FROM users WHERE id = ?')
+              const user = await this.env.DB.prepare('SELECT id, nickname, avatar_key FROM users WHERE id = ?')
                 .bind(userId)
                 .first();
               return { success: true, data: user };
