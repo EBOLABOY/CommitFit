@@ -1,5 +1,4 @@
 import type { Bindings } from '../types';
-import { callLLMNonStream } from './llm';
 
 export type ExecutionMode = 'main' | 'role';
 
@@ -9,43 +8,26 @@ export interface ExecutionDecision {
   source: 'llm' | 'fallback';
 }
 
-const COMPLEX_FALLBACK_PATTERNS = [
-  /训练计划|周计划|今日训练|明日训练|动作安排/i,
-  /营养方案|饮食方案|补剂方案|食谱|宏量营养/i,
-  /分析|识别|评估|解读|诊断|总结/i,
-  /生成|制定|安排|优化|重构|改写/i,
-  /图片|拍照|上传|图像/i,
-];
+// 为了不“限制主模型能力”，这里采用更保守的规则：
+// 仅在用户明确要生成/制定/安排训练计划、饮食/营养方案、补剂方案时才切换 role 模型；
+// 其余（包括解释、常规问答、增删改查）默认走 main。
+const TIME_RANGE_HINT = /(今天|今日|明天|明日|后天|本周|下周|一周|7天|七天|周末)/;
+const GENERATION_VERBS = /(生成|制定|安排|写|出一份|做一份|规划|优化|调整|改写|重写|替换)/i;
+
+const TRAINING_PLAN_HINT = /(训练计划|周计划|训练安排|训练方案|训练表|一周训练)/i;
+const TRAINING_TIME_BASED = /(训练).{0,6}(计划|安排|方案|内容)/;
+
+const NUTRITION_PLAN_HINT = /(营养方案|饮食方案|饮食计划|饮食安排|营养计划|食谱|餐单)/i;
+const NUTRITION_TIME_BASED = /(饮食|营养).{0,6}(计划|安排|方案|食谱)/;
+
+const SUPPLEMENT_PLAN_HINT = /(补剂方案|补剂计划|补剂清单)/i;
+const SUPPLEMENT_TIME_BASED = /(补剂).{0,6}(计划|安排|方案|清单)/;
 
 function normalizeReason(value: unknown): string {
   if (typeof value !== 'string') return '';
   const text = value.trim();
   if (!text) return '';
   return text.length > 80 ? text.slice(0, 80) : text;
-}
-
-function parseJsonObject(text: string): Record<string, unknown> | null {
-  const candidates: string[] = [];
-  const fenceMatches = text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
-  for (const m of fenceMatches) {
-    if (m[1]) candidates.push(m[1].trim());
-  }
-  candidates.push(text.trim());
-
-  for (const candidate of candidates) {
-    const start = candidate.indexOf('{');
-    const end = candidate.lastIndexOf('}');
-    const source = start >= 0 && end > start ? candidate.slice(start, end + 1) : candidate;
-    try {
-      const parsed = JSON.parse(source);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // continue trying
-    }
-  }
-  return null;
 }
 
 function fallbackDecision(message: string, hasImageInput: boolean): ExecutionDecision {
@@ -56,10 +38,20 @@ function fallbackDecision(message: string, hasImageInput: boolean): ExecutionDec
       source: 'fallback',
     };
   }
-  const isComplex = COMPLEX_FALLBACK_PATTERNS.some((pattern) => pattern.test(message));
+
+  const text = message.trim();
+  const isPlanLike =
+    TRAINING_PLAN_HINT.test(text) ||
+    NUTRITION_PLAN_HINT.test(text) ||
+    SUPPLEMENT_PLAN_HINT.test(text) ||
+    (TIME_RANGE_HINT.test(text) && (TRAINING_TIME_BASED.test(text) || NUTRITION_TIME_BASED.test(text) || SUPPLEMENT_TIME_BASED.test(text)));
+
+  const isGenerationRequest = GENERATION_VERBS.test(text) || TIME_RANGE_HINT.test(text);
+  const isComplex = isPlanLike && isGenerationRequest;
+
   return {
     mode: isComplex ? 'role' : 'main',
-    reason: isComplex ? '命中复杂任务规则' : '命中简单任务规则',
+    reason: isComplex ? '涉及计划/方案生成，切换 role 模型' : '默认主模型（解释/问答/CRUD）',
     source: 'fallback',
   };
 }
@@ -77,43 +69,12 @@ export async function decideExecutionMode(
     };
   }
 
-  const prompt = [
-    '你是任务复杂度分流器。请判断用户请求该走哪条模型执行链路：',
-    '- main: 简单问答、轻量信息确认、短解释、常规增删改查指导。',
-    '- role: 需要深度生成或分析，例如训练计划、营养/补剂方案、图片分析、复杂评估。',
-    '',
-    '你必须只输出 JSON，不要输出任何额外文字：',
-    '{"mode":"main","reason":"一句话理由"}',
-    '',
-    `用户请求：${message}`,
-    `是否包含图片输入：${hasImageInput ? '是' : '否'}`,
-  ].join('\n');
-
-  try {
-    const raw = await callLLMNonStream({
-      env,
-      messages: [
-        { role: 'system', content: '你是严格 JSON 分流器，只输出 JSON。' },
-        { role: 'user', content: prompt },
-      ],
-      timeoutMs: 20_000,
-      maxAttempts: 1,
-    });
-
-    const obj = parseJsonObject(raw);
-    if (!obj) return fallbackDecision(message, hasImageInput);
-
-    const mode = obj.mode;
-    const reason = normalizeReason(obj.reason);
-    if (mode === 'main' || mode === 'role') {
-      return {
-        mode,
-        reason: reason || (mode === 'role' ? 'LLM 判定为复杂任务' : 'LLM 判定为简单任务'),
-        source: 'llm',
-      };
-    }
-    return fallbackDecision(message, hasImageInput);
-  } catch {
-    return fallbackDecision(message, hasImageInput);
-  }
+  // 不再调用 LLM 做分流，避免额外开销与误判导致“主模型被限制”。
+  // 保留 env 参数是为了兼容既有调用签名与未来扩展。
+  void env;
+  const decision = fallbackDecision(message, hasImageInput);
+  return {
+    ...decision,
+    reason: normalizeReason(decision.reason) || decision.reason,
+  };
 }
