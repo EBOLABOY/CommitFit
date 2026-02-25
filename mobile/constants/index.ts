@@ -8,28 +8,28 @@ export const SUPERVISOR_AGENT_NAMESPACE = 'supervisor-agent';
 // ============ Design Tokens ============
 
 export const LightColors = {
-  primary: '#FF6B35',      // 品牌珊瑚橙
-  primaryLight: '#FFF4EF',
-  primaryAlpha: 'rgba(255, 107, 53, 0.10)',
-  danger: '#DC2626',       // Apple 红
+  primary: '#10B981',      // Emerald Green, 活力翡翠绿（呼应参考图）
+  primaryLight: '#ECFDF5', // 极淡的绿
+  primaryAlpha: 'rgba(16, 185, 129, 0.15)', // 增加一点通透感
+  danger: '#EF4444',       // 错误红
   dangerLight: '#FEF2F2',
-  info: '#0EA5E9',         // 天空蓝
-  infoLight: '#F0F9FF',
-  success: '#16A34A',      // 翡翠绿
+  info: '#3B82F6',         // 科技蓝
+  infoLight: '#EFF6FF',
+  success: '#22C55E',      // 确认绿
   successLight: '#F0FDF4',
-  warning: '#EAB308',      // 琥珀黄
-  warningLight: '#FEFCE8',
+  warning: '#F59E0B',      // 活力黄
+  warningLight: '#FFFBEB',
 
-  text: '#0F172A',         // Slate 900，极深
-  textSecondary: '#64748B', // Slate 500
+  text: '#0F172A',         // Slate 900，更深邃以提升对比度
+  textSecondary: '#475569', // Slate 600
   textTertiary: '#94A3B8',  // Slate 400
-  background: '#F8FAFC',   // Slate 50，几乎白
-  surface: '#FFFFFF',
+  background: '#F1F5F9',   // Slate 100，非纯白，高级浅灰底
+  surface: '#FFFFFF',      // 卡片纯白色，拉开与背景级差
   border: '#E2E8F0',       // Slate 200
-  borderLight: '#F1F5F9',  // Slate 100
+  borderLight: '#F8FAFC',  // Slate 50
   disabled: '#CBD5E1',     // Slate 300
 
-  glassBackground: 'rgba(255, 255, 255, 0.78)',
+  glassBackground: 'rgba(255, 255, 255, 0.85)',
 };
 
 export const DarkColors = {
@@ -94,9 +94,9 @@ export const FontSize = {
 // ============ Shadows ============
 
 export const Shadows = {
-  sm: { shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 4, elevation: 1 },
-  md: { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 8, elevation: 3 },
-  lg: { shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.10, shadowRadius: 12, elevation: 5 },
+  sm: { shadowColor: '#64748B', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
+  md: { shadowColor: '#64748B', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.08, shadowRadius: 20, elevation: 4 },
+  lg: { shadowColor: '#64748B', shadowOffset: { width: 0, height: 16 }, shadowOpacity: 0.10, shadowRadius: 32, elevation: 6 },
 } as const;
 
 // ============ HitSlop ============

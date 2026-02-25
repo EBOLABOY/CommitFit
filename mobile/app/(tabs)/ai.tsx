@@ -107,11 +107,22 @@ export default function AIChatScreen() {
   const [pendingImage, setPendingImage] = useState<{ uri: string; base64: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [token, setTokenState] = useState<string | null>(null);
+  // 排队消息：AI 回复期间用户发送的消息将暂存此处，待 AI 完成后自动触发
+  const [queuedMessage, setQueuedMessage] = useState<{ text: string; imageDataUri?: string } | null>(null);
   const flatListRef = useRef<FlatList>(null);
 
   useEffect(() => {
     getToken().then(setTokenState);
   }, []);
+
+  // AI 完成时，自动发送排队中的消息
+  useEffect(() => {
+    if (!isLoading && queuedMessage) {
+      const { text, imageDataUri } = queuedMessage;
+      setQueuedMessage(null);
+      sendMessage(text, imageDataUri);
+    }
+  }, [isLoading, queuedMessage, sendMessage]);
 
   // Auto-scroll
   useEffect(() => {
@@ -254,7 +265,6 @@ export default function AIChatScreen() {
   };
 
   const handleSend = useCallback(async (presetText?: string) => {
-    if (isLoading) return;
     const text = (presetText ?? input).trim() || (pendingImage ? '请帮我分析这张图片' : '');
     if (!text) return;
 
@@ -266,15 +276,11 @@ export default function AIChatScreen() {
       if (pendingImage.base64.length < INLINE_THRESHOLD) {
         imageDataUri = `data:image/jpeg;base64,${pendingImage.base64}`;
       } else {
-        // Upload large images first
         try {
           const uploadRes = await api.uploadImage(pendingImage.uri);
-          if (uploadRes.success && uploadRes.data?.key) {
-            // For WebSocket, we can't pass image_key directly; pass as data URI
-            imageDataUri = `data:image/jpeg;base64,${pendingImage.base64}`;
-          } else {
-            imageDataUri = `data:image/jpeg;base64,${pendingImage.base64}`;
-          }
+          imageDataUri = uploadRes.success && uploadRes.data?.key
+            ? `data:image/jpeg;base64,${pendingImage.base64}`
+            : `data:image/jpeg;base64,${pendingImage.base64}`;
         } catch {
           imageDataUri = `data:image/jpeg;base64,${pendingImage.base64}`;
         }
@@ -283,7 +289,14 @@ export default function AIChatScreen() {
 
     setInput('');
     setPendingImage(null);
-    sendMessage(text, imageDataUri);
+
+    if (isLoading) {
+      // Codex CLI 风格：AI 回复期间排队，待完成后自动发送
+      setQueuedMessage({ text, imageDataUri });
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } else {
+      sendMessage(text, imageDataUri);
+    }
   }, [isLoading, input, pendingImage, sendMessage]);
 
   const writebackText = useMemo(() => {
@@ -316,7 +329,7 @@ export default function AIChatScreen() {
   return (
     <KeyboardAvoidingView
       style={[styles.container, { backgroundColor: Colors.background, paddingTop: insets.top }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}
     >
       {messages.length === 0 ? (
@@ -507,27 +520,55 @@ export default function AIChatScreen() {
         </View>
       )}
 
+      {/* 排队提示 Banner */}
+      {!!queuedMessage && (
+        <Pressable
+          style={[styles.queueBanner, { backgroundColor: Colors.primaryLight, borderColor: Colors.primary + '40' }]}
+          onPress={() => setQueuedMessage(null)}
+        >
+          <Ionicons name="time-outline" size={14} color={Colors.primary} />
+          <Text style={[styles.queueBannerText, { color: Colors.primary }]} numberOfLines={1}>
+            排队中：{queuedMessage.text}
+          </Text>
+          <Ionicons name="close-circle" size={16} color={Colors.primary} />
+        </Pressable>
+      )}
+
       {/* Input bar */}
       <View style={[styles.inputContainer, { backgroundColor: Colors.surface, borderTopColor: Colors.borderLight }]}>
-        <TouchableOpacity style={styles.imageButton} onPress={handleImageButton} disabled={isLoading}>
-          <Ionicons name="image-outline" size={24} color={isLoading ? Colors.disabled : Colors.primary} />
+        <TouchableOpacity style={styles.imageButton} onPress={handleImageButton} disabled={!!queuedMessage}>
+          <Ionicons name="image-outline" size={24} color={queuedMessage ? Colors.disabled : Colors.primary} />
         </TouchableOpacity>
         <TextInput
           style={[styles.input, { backgroundColor: Colors.background, color: Colors.text }]}
-          placeholder={pendingImage ? '描述一下这张图片...' : '输入你的问题...'}
+          placeholder={
+            queuedMessage ? '已排队，AI 完成后自动发送...' :
+              pendingImage ? '描述一下这张图片...' : '输入你的问题...'
+          }
           placeholderTextColor={Colors.textTertiary}
           value={input}
           onChangeText={setInput}
           multiline
           maxLength={2000}
-          editable={!isLoading}
+          editable={!queuedMessage}
         />
         <TouchableOpacity
-          style={[styles.sendButton, { backgroundColor: (input.trim() || pendingImage) && !isLoading && isConnected ? Colors.primary : Colors.disabled }]}
+          style={[styles.sendButton, {
+            backgroundColor:
+              queuedMessage ? Colors.disabled :
+                (input.trim() || pendingImage) && isConnected
+                  ? isLoading ? Colors.warning ?? '#F39C12'
+                    : Colors.primary
+                  : Colors.disabled,
+          }]}
           onPress={() => void handleSend()}
-          disabled={isLoading || (!input.trim() && !pendingImage) || !isConnected}
+          disabled={!!queuedMessage || (!input.trim() && !pendingImage) || !isConnected}
         >
-          <Ionicons name="arrow-up" size={20} color="#FFFFFF" />
+          <Ionicons
+            name={isLoading && (input.trim() || !!pendingImage) ? 'hourglass-outline' : 'arrow-up'}
+            size={20}
+            color="#FFFFFF"
+          />
         </TouchableOpacity>
       </View>
 
@@ -690,6 +731,20 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.xs,
   },
   errorBannerText: { flex: 1, fontSize: FontSize.xs },
+
+  // 排队中 Banner
+  queueBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.sm,
+  },
+  queueBannerText: { flex: 1, fontSize: FontSize.xs, fontWeight: '500' },
 
   // Writeback banner
   writebackBanner: {
