@@ -403,7 +403,14 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const isLocalFirstWriteback = writebackMode !== 'remote';
 
       const syncProfileTool = tool({
-        description: '当识别到用户健康数据或记录类数据（体重、睡眠、伤病、训练目标、训练记录、饮食记录等）时调用，将数据同步到用户档案与记录表。请在回复完用户问题后调用。',
+        description: [
+          '当用户在对话中明确给出可写回的数据/操作（身体档案、伤病记录、训练目标、训练计划、饮食记录、日志等）时调用，用于把信息同步到用户数据。',
+          '重要：写回内容必须来自用户原话/近期对话中的事实，不要把助手的确认语、客套话（如“好的/已记录/明白了”）写入任何字段。',
+          '清空伤病记录：设置 conditions_mode="clear_all"，不要传 conditions。',
+          '清空训练目标：设置 training_goals_mode="clear_all"，不要编造 training_goals。',
+          '先清空再写入：分别使用 *_mode="replace_all" 并提供对应列表。',
+          '请在回复完用户问题后再调用。',
+        ].join('\n'),
         inputSchema: syncProfileToolSchema,
         // Local-First：工具仅生成草稿，不直接写远端，因此不需要人工审批。
         // remote 模式保留旧行为（直写远端 + needsApproval）以便回滚/灰度。
