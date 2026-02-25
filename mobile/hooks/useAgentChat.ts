@@ -528,8 +528,55 @@ export function useAgentChat(sessionId = 'default') {
         const meta = toolCallInfoRef.current.get(toolCallId);
         const toolName = meta?.toolName || '';
         const output = chunk.output;
+        const preliminary = chunk.preliminary === true;
+
+        if (toolName === 'delegate_generate') {
+          // Delegate streaming: backend yields { kind, delta } as preliminary outputs,
+          // and yields { success, kind, role, plan_date, content } as final output.
+          if (isPlainObject(output)) {
+            if (output.success === false) {
+              setError(typeof output.error === 'string' ? output.error : '委托生成失败');
+            } else if (typeof output.delta === 'string' && output.delta) {
+              // Ensure we have an assistant placeholder even if the model called the tool before any text-start.
+              if (!currentAssistantIdRef.current) {
+                const assistantId = `stream-${Date.now()}`;
+                currentAssistantIdRef.current = assistantId;
+                setMessages((prev) => [...prev, {
+                  id: assistantId,
+                  role: 'assistant',
+                  content: '',
+                  isStreaming: true,
+                }]);
+              }
+              appendToCurrentAssistant(output.delta);
+            } else if (!preliminary && typeof output.content === 'string' && output.content.trim()) {
+              // Fallback: if no deltas were delivered, show the final content once.
+              if (!currentAssistantIdRef.current) {
+                const assistantId = `stream-${Date.now()}`;
+                currentAssistantIdRef.current = assistantId;
+                setMessages((prev) => [...prev, {
+                  id: assistantId,
+                  role: 'assistant',
+                  content: '',
+                  isStreaming: true,
+                }]);
+              }
+              // Avoid duplicating if the stream already appended deltas.
+              // Only fill when current content is empty.
+              const assistantId = currentAssistantIdRef.current;
+              if (assistantId) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId && !m.content ? { ...m, content: output.content as string } : m
+                  )
+                );
+              }
+            }
+          }
+        }
 
         if (toolName === 'sync_profile') {
+          if (preliminary) break;
           if (isPlainObject(output)) {
             // Local-First output: { success, draft_id, payload, context_text, summary_text }
             if (output.success === false) {
@@ -561,7 +608,9 @@ export function useAgentChat(sessionId = 'default') {
           }
         }
 
-        toolCallInfoRef.current.delete(toolCallId);
+        if (!preliminary) {
+          toolCallInfoRef.current.delete(toolCallId);
+        }
         break;
       }
       case 'tool-output-error':
