@@ -350,7 +350,8 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         }
 
         const label = directClearTarget === 'conditions' ? '伤病记录' : '训练目标';
-        this.broadcastCustom({ type: 'status', message: `正在清空${label}...` });
+        const labelShort = directClearTarget === 'conditions' ? '伤病' : '目标';
+        this.broadcastCustom({ type: 'status', message: `清空${labelShort}` });
 
         try {
           const payload = directClearTarget === 'conditions'
@@ -400,7 +401,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         .filter((m) => m.content.trim().length > 0);
 
       // 3. 单角色固定模式：不再进行多角色路由
-      this.broadcastCustom({ type: 'status', message: '单角色模式处理中...' });
+      this.broadcastCustom({ type: 'status', message: '处理中' });
       const routing: { primaryRole: AIRole; collaborators: AIRole[]; reason: string } = {
         primaryRole: activeRole,
         collaborators: [],
@@ -424,7 +425,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       this.broadcastCustom(routingBroadcast);
 
       // 5. Build system prompt with user context
-      this.broadcastCustom({ type: 'status', message: '正在查阅你的档案...' });
+      this.broadcastCustom({ type: 'status', message: '读取档案' });
       let userContext: Awaited<ReturnType<typeof getUserContext>>;
       try {
         userContext = await getUserContext(this.env.DB, userId);
@@ -443,9 +444,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const contextStr = buildContextForRole(activeRole, userContext);
       const architectureGuidanceLines: string[] = [
         [
-          '架构要点：主模型负责对话与工具编排；计划/方案/图片分析用 delegate_generate（工具输出可流式展示）；需要保存/更新时先 query_user_data 查看同日旧内容并决定覆盖或合并，再用 sync_profile 写回（同日只保留一份）。',
+          '工作约定：计划/方案/图片分析可使用 delegate_generate；需要保存/更新时先 query_user_data 查看同日旧内容并决定覆盖或合并，再用 sync_profile 写回（同日只保留一份）。',
           '写回硬约束：凡是对用户数据的新增/删除/修改/清空/保存/同步请求，必须调用 sync_profile 工具执行；未调用工具前，禁止在文字中宣称“已删除/已清空/已保存/已同步”。',
           '禁止账号/密码类操作；禁止把客套话写入数据字段。',
+          '对外沟通：不要提及模型切换、路由、委托或工具实现细节；只用用户可理解的语言描述你正在做的事。',
         ].join('\n'),
       ];
       if (hasImageInput && userImageUrl) {
@@ -462,12 +464,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const sanitizedMessages = sanitizeMessagesForLLM([...this.messages]);
       const trimmedConversation = trimConversationByTokenBudget(sanitizedMessages, historyTokenBudget);
 
-      this.broadcastCustom({ type: 'status', message: `正在呼叫【${ROLE_NAMES[activeRole]}】...` });
-
       // 6. Stream response via AI SDK
       const model = getMainLLMModel(this.env);
       const modelAlias = 'LLM';
-      this.broadcastCustom({ type: 'status', message: '主模型流式处理中（生成/分析类任务将委托深度生成器）...' });
+      this.broadcastCustom({ type: 'status', message: '回答中' });
 
       const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
       const writebackMode = writebackModeRaw.toLowerCase();
@@ -705,15 +705,15 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                 ? ((args as Record<string, unknown>).image_url as string)
                 : null;
 
-              const kindLabel =
+              const statusMessage =
                 kind === 'training_plan'
-                  ? '训练计划'
+                  ? '生成计划'
                   : kind === 'nutrition_plan'
-                    ? '饮食方案'
+                    ? '生成饮食'
                     : kind === 'supplement_plan'
-                      ? '补剂方案'
-                      : '分析';
-              agent.broadcastCustom({ type: 'status', message: `正在委托深度生成器：${kindLabel}...` });
+                      ? '生成补剂'
+                      : '分析中';
+              agent.broadcastCustom({ type: 'status', message: statusMessage });
 
               // 只在委托生成时补充更丰富的用户事实（避免放大主链路 prompt）。
               const since30 = dateDaysAgoUTC(30);
@@ -1041,7 +1041,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
     } catch (error) {
       console.error('[SupervisorAgent] onChatMessage failed:', error);
       try {
-        this.broadcastCustom({ type: 'status', message: '处理失败，请稍后重试。' });
+        this.broadcastCustom({ type: 'status', message: '失败，请重试' });
       } catch {
         // ignore broadcast failure
       }
