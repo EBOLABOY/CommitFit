@@ -868,6 +868,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                   maxOutputTokens,
                   temperature,
                   abortSignal,
+                  timeout: 90_000,
                 })
                 : streamText({
                   model: roleModel,
@@ -876,6 +877,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                   maxOutputTokens,
                   temperature,
                   abortSignal,
+                  timeout: 90_000,
                 });
 
               let fullText = '';
@@ -985,6 +987,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           ? { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool, sync_profile: syncProfileTool }
           : { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool },
         stopWhen: allowProfileSync ? stepCountIs(6) : stepCountIs(4),
+        timeout: 60_000,
         onFinish: async (event) => {
           const text = event.text;
 
