@@ -20,8 +20,10 @@ const commitSchema = z.object({
 type CommitRow = {
   user_id: string;
   status: string;
+  payload_json: string | null;
   summary_json: string | null;
   error: string | null;
+  updated_at: string | null;
 };
 
 function toErrMsg(error: unknown): string {
@@ -55,7 +57,7 @@ writebackRoutes.post('/commit', async (c) => {
   }
 
   const existing = await c.env.DB.prepare(
-    'SELECT user_id, status, summary_json, error FROM writeback_commits WHERE draft_id = ?'
+    'SELECT user_id, status, payload_json, summary_json, error, updated_at FROM writeback_commits WHERE draft_id = ?'
   )
     .bind(draftId)
     .first<CommitRow>();
@@ -75,7 +77,77 @@ writebackRoutes.post('/commit', async (c) => {
       });
     }
     if (existing.status === 'pending') {
-      return c.json({ success: true, data: { draft_id: draftId, status: 'pending' } }, 202);
+      // 若上一次提交请求在网络断开/执行中断等情况下卡在 pending，这里按“幂等 + 可恢复”最佳实践做接管：
+      // 仅当 pending 超过一段时间（例如 15s）视为可重试，避免并发下重复应用。
+      const takeover = await c.env.DB.prepare(
+        `UPDATE writeback_commits
+         SET updated_at = datetime('now')
+         WHERE draft_id = ? AND user_id = ? AND status = 'pending'
+           AND updated_at <= datetime('now', '-15 seconds')`
+      )
+        .bind(draftId, userId)
+        .run();
+
+      if (!takeover.meta?.changes) {
+        return c.json({ success: true, data: { draft_id: draftId, status: 'pending' } }, 202);
+      }
+
+      let payloadFromDb: unknown = null;
+      try {
+        payloadFromDb = existing.payload_json ? JSON.parse(existing.payload_json) : null;
+      } catch {
+        payloadFromDb = null;
+      }
+
+      if (!payloadFromDb || typeof payloadFromDb !== 'object' || Array.isArray(payloadFromDb)) {
+        const errMsg = '同步草稿解析失败（payload_json 无效）';
+        try {
+          await c.env.DB.prepare(
+            `UPDATE writeback_commits
+             SET status = 'failed', error = ?, updated_at = datetime('now')
+             WHERE draft_id = ? AND user_id = ?`
+          )
+            .bind(errMsg, draftId, userId)
+            .run();
+        } catch { /* ignore */ }
+        return c.json({ success: false, error: errMsg }, 500);
+      }
+
+      try {
+        const summary = await applyAutoWriteback(c.env.DB, userId, payloadFromDb as any, { contextText });
+        const summaryJson = JSON.stringify(summary);
+
+        await c.env.DB.prepare(
+          `UPDATE writeback_commits
+           SET status = 'success', summary_json = ?, error = NULL, updated_at = datetime('now')
+           WHERE draft_id = ? AND user_id = ?`
+        )
+          .bind(summaryJson, draftId, userId)
+          .run();
+
+        try {
+          await recordWritebackAudit(c.env.DB, userId, 'writeback_commit', summary, null, contextText || '[commit]');
+        } catch { /* ignore */ }
+
+        return c.json({ success: true, data: { draft_id: draftId, status: 'success', summary, committed: true } });
+      } catch (error) {
+        const errMsg = toErrMsg(error);
+        try {
+          await c.env.DB.prepare(
+            `UPDATE writeback_commits
+             SET status = 'failed', error = ?, updated_at = datetime('now')
+             WHERE draft_id = ? AND user_id = ?`
+          )
+            .bind(errMsg, draftId, userId)
+            .run();
+        } catch { /* ignore */ }
+
+        try {
+          await recordWritebackAudit(c.env.DB, userId, 'writeback_commit', null, errMsg, contextText || '[commit]');
+        } catch { /* ignore */ }
+
+        return c.json({ success: false, error: errMsg }, 500);
+      }
     }
     return c.json({ success: false, error: existing.error || '上次同步失败' }, 409);
   }
@@ -92,7 +164,7 @@ writebackRoutes.post('/commit', async (c) => {
   } catch (error) {
     // 可能是并发插入导致的冲突，回读一次并按既有状态返回
     const raced = await c.env.DB.prepare(
-      'SELECT user_id, status, summary_json, error FROM writeback_commits WHERE draft_id = ?'
+      'SELECT user_id, status, payload_json, summary_json, error, updated_at FROM writeback_commits WHERE draft_id = ?'
     )
       .bind(draftId)
       .first<CommitRow>();
