@@ -87,5 +87,9 @@ export const syncProfileToolSchema = z.object({
     note: z.string().optional(),
   }).optional(),
   daily_log_delete_date: dateOnlySchema.optional().describe('删除指定日期的体重/睡眠日志'),
-  summary_text: z.string().describe('对用户友好的中文摘要，说明要同步哪些数据'),
+  summary_text: z
+    .string()
+    .max(200)
+    .optional()
+    .describe('可选：对用户友好的中文摘要，说明要同步哪些数据（未填则由客户端/服务端做默认展示）'),
 });

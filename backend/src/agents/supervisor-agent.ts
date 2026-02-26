@@ -374,7 +374,11 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       }
       const contextStr = buildContextForRole(activeRole, userContext);
       const architectureGuidanceLines: string[] = [
-        '架构要点：主模型负责对话与工具编排；计划/方案/图片分析用 delegate_generate（工具输出可流式展示）；需要保存/更新时先 query_user_data 查看同日旧内容并决定覆盖或合并，再用 sync_profile 写回（同日只保留一份）；禁止账号/密码类操作；禁止把客套话写入数据。',
+        [
+          '架构要点：主模型负责对话与工具编排；计划/方案/图片分析用 delegate_generate（工具输出可流式展示）；需要保存/更新时先 query_user_data 查看同日旧内容并决定覆盖或合并，再用 sync_profile 写回（同日只保留一份）。',
+          '写回硬约束：凡是对用户数据的新增/删除/修改/清空/保存/同步请求，必须调用 sync_profile 工具执行；未调用工具前，禁止在文字中宣称“已删除/已清空/已保存/已同步”。',
+          '禁止账号/密码类操作；禁止把客套话写入数据字段。',
+        ].join('\n'),
       ];
       if (hasImageInput && userImageUrl) {
         architectureGuidanceLines.push(`本次输入包含图片 URL：${userImageUrl}`);
@@ -870,6 +874,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const syncProfileTool = tool({
         description: [
           '当用户在对话中明确给出可写回的数据/操作（身体档案、伤病记录、训练目标、训练计划、饮食记录、日志等）时调用，用于把信息同步到用户数据。',
+          '硬约束：除非你已调用 sync_profile 并拿到成功结果（或草稿 draft_id），否则不要在文字中说“已删除/已清空/已保存/已同步”。',
           '重要：写回内容必须来自用户原话/近期对话中的事实，不要把助手的确认语、客套话（如“好的/已记录/明白了”）写入任何字段。',
           '清空伤病记录：设置 conditions_mode="clear_all"，不要传 conditions。',
           '清空训练目标：设置 training_goals_mode="clear_all"，不要编造 training_goals。',
@@ -880,6 +885,8 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '删除饮食记录：使用 diet_records_delete（优先 id；否则 meal_type + record_date）。',
           '禁止操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
           '当你确定需要写回时即可调用（可在生成结果后、最终答复前调用）。',
+          '示例（清空伤病记录）：{"conditions_mode":"clear_all","summary_text":"清空伤病记录"}',
+          '示例（清空训练目标）：{"training_goals_mode":"clear_all","summary_text":"清空训练目标"}',
         ].join('\n'),
         inputSchema: syncProfileToolSchema,
         // Local-First：工具仅生成草稿，不直接写远端，因此不需要人工审批。
