@@ -116,6 +116,21 @@ function resolveActiveRole(value: string | undefined): AIRole {
   return 'trainer';
 }
 
+function shouldForceSyncProfileTool(userText: string): boolean {
+  const t = userText.trim();
+  if (!t) return false;
+  // 禁止账号/密码类意图触发写回工具（这些不允许用 sync_profile 操作）
+  if (/(账号|账户|密码|口令|邮箱|email|注销|删除账号|删除账户)/i.test(t)) return false;
+
+  // 仅对“明确的删除/清空/重置”类写回做强制工具调用，避免误伤普通咨询。
+  const hasVerb = /(清空|清除|删除|移除|重置|清理)/.test(t);
+  if (!hasVerb) return false;
+
+  // 必须包含可落库的目标对象词，否则让模型先问清楚再写回。
+  const hasTarget = /(伤病|伤病记录|训练目标|目标|理化指标|指标|饮食记录|饮食|训练计划|计划|日志|体重|睡眠|档案|身体|昵称|头像)/.test(t);
+  return hasTarget;
+}
+
 function extractImageUrl(msg: AgentMessageLike | undefined): string | null {
   if (!msg?.parts || !Array.isArray(msg.parts)) return null;
   for (const part of msg.parts) {
@@ -937,6 +952,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         system: systemPrompt,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: await convertToModelMessages(trimmedConversation as any),
+        toolChoice: (allowProfileSync && shouldForceSyncProfileTool(userText))
+          ? { type: 'tool', toolName: 'sync_profile' }
+          : 'auto',
         tools: allowProfileSync
           ? { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool, sync_profile: syncProfileTool }
           : { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool },
