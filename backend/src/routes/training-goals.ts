@@ -18,7 +18,10 @@ trainingGoalRoutes.get('/', async (c) => {
   let query = 'SELECT * FROM training_goals WHERE user_id = ?';
   const params: string[] = [userId];
 
-  if (status) {
+  if (status && status !== 'all') {
+    if (!isEnumValue(status, STATUS_VALUES)) {
+      return c.json({ success: false, error: 'status 只能是 active/completed/all' }, 400);
+    }
     query += ' AND status = ?';
     params.push(status);
   }
