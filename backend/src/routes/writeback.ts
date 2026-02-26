@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Bindings, Variables } from '../types';
 import { authMiddleware } from '../middleware/auth';
-import { applyAutoWriteback, recordWritebackAudit } from '../services/orchestrator';
+import { applyAutoWriteback, recordWritebackAudit, sanitizeWritebackPayloadForContext } from '../services/orchestrator';
 import { syncProfileToolSchema } from '../agents/sync-profile-tool';
 
 export const writebackRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -48,8 +48,18 @@ writebackRoutes.post('/commit', async (c) => {
   }
 
   const draftId = parsed.data.draft_id;
-  const payload = parsed.data.payload ?? {};
   const contextText = typeof parsed.data.context_text === 'string' ? parsed.data.context_text : '';
+  const payloadRaw = parsed.data.payload ?? {};
+  const { payload, dropped } = sanitizeWritebackPayloadForContext(
+    payloadRaw as unknown as Record<string, unknown>,
+    contextText
+  );
+  if (dropped.length > 0) {
+    console.warn('[writeback/commit] payload sanitized:', { dropped, userId });
+  }
+  if (Object.keys(payload).length === 0) {
+    return c.json({ success: false, error: '本次同步请求未包含明确可写回的目标模块，请在对话中明确说明要修改哪些信息。' }, 400);
+  }
 
   const existing = await c.env.DB.prepare(
     'SELECT user_id, status, summary_json, error FROM writeback_commits WHERE draft_id = ?'
@@ -78,7 +88,7 @@ writebackRoutes.post('/commit', async (c) => {
   }
 
   // 先写入 pending 记录作为幂等锁，防止重试/并发导致重复写入
-  const payloadJson = JSON.stringify(payload ?? {});
+  const payloadJson = JSON.stringify(payload);
   try {
     await c.env.DB.prepare(
       `INSERT INTO writeback_commits (draft_id, user_id, status, payload_json, created_at, updated_at)
@@ -139,4 +149,3 @@ writebackRoutes.post('/commit', async (c) => {
     return c.json({ success: false, error: errMsg }, 500);
   }
 });
-

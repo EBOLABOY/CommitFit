@@ -176,6 +176,243 @@ interface ExtractedWritebackPayload {
   daily_log_delete_date?: string | null;
 }
 
+export type WritebackResource =
+  | 'user'
+  | 'profile'
+  | 'conditions'
+  | 'training_goals'
+  | 'health_metrics'
+  | 'training_plan'
+  | 'nutrition_plan'
+  | 'supplement_plan'
+  | 'diet_records'
+  | 'daily_log';
+
+const WRITEBACK_DESTRUCTIVE_INTENT_RE = /(删除|清空|清除|移除|重置|清掉|全删|全部删除|删除所有|清空所有|重置所有)/;
+const WRITEBACK_REPLACE_INTENT_RE = /(替换|覆盖|重写|重新生成|更新为|改成|改为|用新的替换|用新计划替换)/;
+const WRITEBACK_SYNC_INTENT_RE = /(同步|保存|写回|提交|应用|生效)/;
+
+const WRITEBACK_SCOPE_PATTERNS: Record<WritebackResource, RegExp> = {
+  user: /(昵称|头像)/,
+  profile: /(身高|出生|生日|性别|训练年限|档案|资料|个人信息|个人资料)/,
+  conditions: /(伤病|病理|受伤|扭伤|拉伤|疼|痛|不适|康复|膝|腰|肩|跟腱|髌腱|腰椎)/,
+  training_goals: /(训练目标|目标|增肌|减脂|体脂|力量目标|扣篮|减重|增重)/,
+  health_metrics: /(理化|指标|体检|化验|血压|血糖|血脂|睾酮|心率|体脂率|bmi)/,
+  training_plan: /(训练计划|训练安排|安排训练|本周训练|一周训练|今天训练|明天训练|训练日程)/,
+  nutrition_plan: /(饮食方案|营养方案|饮食计划|食谱|宏量|热量计划)/,
+  supplement_plan: /(补剂方案|补剂|蛋白粉|肌酸|鱼油|维生素|supplement)/,
+  diet_records: /(饮食记录|记录饮食|早餐|午餐|晚餐|加餐|我吃|吃了)/,
+  daily_log: /(体重日志|睡眠日志|每日日志|睡眠|失眠)/,
+};
+
+function hasWritebackResourcePayload(payload: ExtractedWritebackPayload, resource: WritebackResource): boolean {
+  switch (resource) {
+    case 'user': return payload.user != null;
+    case 'profile': return payload.profile != null;
+    case 'conditions': return payload.conditions != null || payload.conditions_mode != null || payload.conditions_delete_ids != null;
+    case 'training_goals': return payload.training_goals != null || payload.training_goals_mode != null || payload.training_goals_delete_ids != null;
+    case 'health_metrics': return payload.health_metrics != null || payload.health_metrics_update != null || payload.health_metrics_delete_ids != null;
+    case 'training_plan': return payload.training_plan != null || payload.training_plan_delete_date != null;
+    case 'nutrition_plan': return payload.nutrition_plan != null || payload.nutrition_plan_delete_date != null;
+    case 'supplement_plan': return payload.supplement_plan != null || payload.supplement_plan_delete_date != null;
+    case 'diet_records': return payload.diet_records != null || payload.diet_records_delete != null;
+    case 'daily_log': return payload.daily_log != null || payload.daily_log_delete_date != null;
+  }
+}
+
+export function sanitizeWritebackPayloadForContext(
+  payload: ExtractedWritebackPayload | null | undefined,
+  contextText: string
+): { payload: ExtractedWritebackPayload; dropped: string[] } {
+  const dropped: string[] = [];
+  if (!payload || typeof payload !== 'object') return { payload: {}, dropped };
+
+  const text = (contextText || '').toLowerCase();
+  const allowDestructive = WRITEBACK_DESTRUCTIVE_INTENT_RE.test(text);
+  const allowReplaceAll = WRITEBACK_REPLACE_INTENT_RE.test(text);
+  const allowSyncFallback = WRITEBACK_SYNC_INTENT_RE.test(text);
+
+  const explicitScope = new Set<WritebackResource>();
+  for (const key of Object.keys(WRITEBACK_SCOPE_PATTERNS) as WritebackResource[]) {
+    if (WRITEBACK_SCOPE_PATTERNS[key].test(text)) {
+      explicitScope.add(key);
+    }
+  }
+
+  const hasExplicitScope = explicitScope.size > 0;
+  const highRisk = new Set<WritebackResource>(['training_plan', 'nutrition_plan', 'supplement_plan']);
+
+  const isResourceAllowed = (resource: WritebackResource): boolean => {
+    if (hasExplicitScope) return explicitScope.has(resource);
+    if (!allowSyncFallback) return false;
+    if (highRisk.has(resource)) return false;
+    return hasWritebackResourcePayload(payload, resource);
+  };
+
+  const out: ExtractedWritebackPayload = {};
+
+  // --- user/profile ---
+  if (payload.user != null) {
+    if (isResourceAllowed('user')) out.user = payload.user;
+    else dropped.push('user');
+  }
+  if (payload.profile != null) {
+    if (isResourceAllowed('profile')) out.profile = payload.profile;
+    else dropped.push('profile');
+  }
+
+  // --- conditions ---
+  if (payload.conditions != null) {
+    if (isResourceAllowed('conditions')) out.conditions = payload.conditions;
+    else dropped.push('conditions');
+  }
+  if (payload.conditions_mode != null) {
+    if (!isResourceAllowed('conditions')) {
+      dropped.push('conditions_mode');
+    } else if (payload.conditions_mode === 'clear_all') {
+      if (allowDestructive) out.conditions_mode = payload.conditions_mode;
+      else dropped.push('conditions_mode');
+    } else if (payload.conditions_mode === 'replace_all') {
+      if (allowReplaceAll) out.conditions_mode = payload.conditions_mode;
+      else out.conditions_mode = 'upsert';
+    } else {
+      out.conditions_mode = payload.conditions_mode;
+    }
+  }
+  if (payload.conditions_delete_ids != null) {
+    if (!isResourceAllowed('conditions')) {
+      dropped.push('conditions_delete_ids');
+    } else if (allowDestructive) {
+      out.conditions_delete_ids = payload.conditions_delete_ids;
+    } else {
+      dropped.push('conditions_delete_ids');
+    }
+  }
+
+  // --- training goals ---
+  if (payload.training_goals != null) {
+    if (isResourceAllowed('training_goals')) out.training_goals = payload.training_goals;
+    else dropped.push('training_goals');
+  }
+  if (payload.training_goals_mode != null) {
+    if (!isResourceAllowed('training_goals')) {
+      dropped.push('training_goals_mode');
+    } else if (payload.training_goals_mode === 'clear_all') {
+      if (allowDestructive) out.training_goals_mode = payload.training_goals_mode;
+      else dropped.push('training_goals_mode');
+    } else if (payload.training_goals_mode === 'replace_all') {
+      if (allowReplaceAll) out.training_goals_mode = payload.training_goals_mode;
+      else out.training_goals_mode = 'upsert';
+    } else {
+      out.training_goals_mode = payload.training_goals_mode;
+    }
+  }
+  if (payload.training_goals_delete_ids != null) {
+    if (!isResourceAllowed('training_goals')) {
+      dropped.push('training_goals_delete_ids');
+    } else if (allowDestructive) {
+      out.training_goals_delete_ids = payload.training_goals_delete_ids;
+    } else {
+      dropped.push('training_goals_delete_ids');
+    }
+  }
+
+  // --- health metrics ---
+  if (payload.health_metrics != null) {
+    if (isResourceAllowed('health_metrics')) out.health_metrics = payload.health_metrics;
+    else dropped.push('health_metrics');
+  }
+  if (payload.health_metrics_update != null) {
+    if (isResourceAllowed('health_metrics')) out.health_metrics_update = payload.health_metrics_update;
+    else dropped.push('health_metrics_update');
+  }
+  if (payload.health_metrics_delete_ids != null) {
+    if (!isResourceAllowed('health_metrics')) {
+      dropped.push('health_metrics_delete_ids');
+    } else if (allowDestructive) {
+      out.health_metrics_delete_ids = payload.health_metrics_delete_ids;
+    } else {
+      dropped.push('health_metrics_delete_ids');
+    }
+  }
+
+  // --- training plan ---
+  if (payload.training_plan != null) {
+    if (isResourceAllowed('training_plan')) out.training_plan = payload.training_plan;
+    else dropped.push('training_plan');
+  }
+  if (payload.training_plan_delete_date != null) {
+    if (!isResourceAllowed('training_plan')) {
+      dropped.push('training_plan_delete_date');
+    } else if (allowDestructive) {
+      out.training_plan_delete_date = payload.training_plan_delete_date;
+    } else {
+      dropped.push('training_plan_delete_date');
+    }
+  }
+
+  // --- nutrition/supplement plans ---
+  if (payload.nutrition_plan != null) {
+    if (isResourceAllowed('nutrition_plan')) out.nutrition_plan = payload.nutrition_plan;
+    else dropped.push('nutrition_plan');
+  }
+  if (payload.nutrition_plan_delete_date != null) {
+    if (!isResourceAllowed('nutrition_plan')) {
+      dropped.push('nutrition_plan_delete_date');
+    } else if (allowDestructive) {
+      out.nutrition_plan_delete_date = payload.nutrition_plan_delete_date;
+    } else {
+      dropped.push('nutrition_plan_delete_date');
+    }
+  }
+
+  if (payload.supplement_plan != null) {
+    if (isResourceAllowed('supplement_plan')) out.supplement_plan = payload.supplement_plan;
+    else dropped.push('supplement_plan');
+  }
+  if (payload.supplement_plan_delete_date != null) {
+    if (!isResourceAllowed('supplement_plan')) {
+      dropped.push('supplement_plan_delete_date');
+    } else if (allowDestructive) {
+      out.supplement_plan_delete_date = payload.supplement_plan_delete_date;
+    } else {
+      dropped.push('supplement_plan_delete_date');
+    }
+  }
+
+  // --- diet records ---
+  if (payload.diet_records != null) {
+    if (isResourceAllowed('diet_records')) out.diet_records = payload.diet_records;
+    else dropped.push('diet_records');
+  }
+  if (payload.diet_records_delete != null) {
+    if (!isResourceAllowed('diet_records')) {
+      dropped.push('diet_records_delete');
+    } else if (allowDestructive) {
+      out.diet_records_delete = payload.diet_records_delete;
+    } else {
+      dropped.push('diet_records_delete');
+    }
+  }
+
+  // --- daily log ---
+  if (payload.daily_log != null) {
+    if (isResourceAllowed('daily_log')) out.daily_log = payload.daily_log;
+    else dropped.push('daily_log');
+  }
+  if (payload.daily_log_delete_date != null) {
+    if (!isResourceAllowed('daily_log')) {
+      dropped.push('daily_log_delete_date');
+    } else if (allowDestructive) {
+      out.daily_log_delete_date = payload.daily_log_delete_date;
+    } else {
+      dropped.push('daily_log_delete_date');
+    }
+  }
+
+  return { payload: out, dropped };
+}
+
 export const SYSTEM_PROMPTS: Record<AIRole, string> = {
   doctor: DOCTOR_SYSTEM_PROMPT,
   rehab: REHAB_SYSTEM_PROMPT,

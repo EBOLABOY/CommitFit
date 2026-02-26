@@ -19,6 +19,7 @@ import {
   saveOrchestrateAssistantMessage,
   saveOrchestrateUserMessage,
   applyAutoWriteback,
+  sanitizeWritebackPayloadForContext,
   recordWritebackAudit,
 } from '../services/orchestrator';
 import { getUserContext, buildContextForRole, estimateTokens } from '../services/context';
@@ -965,7 +966,23 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         execute: async (args) => {
           try {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { summary_text, ...writebackPayload } = args;
+            const { summary_text, ...writebackPayloadRaw } = args;
+            const { payload: writebackPayload, dropped } = sanitizeWritebackPayloadForContext(
+              writebackPayloadRaw as unknown as Record<string, unknown>,
+              userText
+            );
+            if (dropped.length > 0) {
+              console.warn('[SupervisorAgent] sync_profile payload sanitized:', {
+                dropped,
+                userId,
+              });
+            }
+            if (Object.keys(writebackPayload).length === 0) {
+              return {
+                success: false,
+                error: '本次同步请求未包含明确可写回的目标模块。请明确你要修改的内容，例如“新增伤病记录：…”。',
+              };
+            }
 
             if (!isLocalFirstWriteback) {
               const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
