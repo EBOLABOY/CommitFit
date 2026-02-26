@@ -97,6 +97,7 @@ export default function AIChatScreen() {
     writebackSummary,
     pendingApproval,
     sendMessage,
+    retryLastMessage,
     approveToolCall,
     rejectToolCall,
     clearMessages,
@@ -506,6 +507,13 @@ export default function AIChatScreen() {
           <Text style={[styles.errorBannerText, { color: Colors.danger }]} numberOfLines={2}>
             {wsError}
           </Text>
+          <TouchableOpacity
+            onPress={retryLastMessage}
+            style={[styles.errorRetryButton, { borderColor: Colors.danger + '66' }]}
+            disabled={isLoading}
+          >
+            <Text style={[styles.errorRetryButtonText, { color: Colors.danger }]}>重试</Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -728,6 +736,16 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.xs,
   },
   errorBannerText: { flex: 1, fontSize: FontSize.xs },
+  errorRetryButton: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+  },
+  errorRetryButtonText: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+  },
 
   // 排队中 Banner
   queueBanner: {

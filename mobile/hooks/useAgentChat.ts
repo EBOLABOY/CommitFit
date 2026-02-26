@@ -36,6 +36,19 @@ type IncomingUIMessage = {
   content?: unknown;
 };
 
+type SendMessageOptions = {
+  allowProfileSync?: boolean;
+  appendUserMessage?: boolean;
+  userMessageId?: string;
+};
+
+type LastSentMessage = {
+  text: string;
+  imageDataUri?: string;
+  allowProfileSync: boolean;
+  userMessageId: string;
+};
+
 // --- WebSocket URL ---
 
 function getWSBaseURL(): string {
@@ -233,6 +246,9 @@ export function useAgentChat(sessionId = 'default') {
   const routingInfoRef = useRef<SSERoutingEvent | null>(null);
   const supplementsRef = useRef<SSESupplementEvent[]>([]);
   const lastWritebackCommitAtRef = useRef<number>(0);
+  const lastSentRef = useRef<LastSentMessage | null>(null);
+  const retryOnNextOpenRef = useRef(false);
+  const retryLastMessageInternalRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     pendingApprovalRef.current = pendingApproval;
@@ -293,6 +309,13 @@ export function useAgentChat(sessionId = 'default') {
         ws.send(JSON.stringify({ type: 'cf_agent_stream_resume_request' }));
       } catch {
         // ignore resume request failure
+      }
+      if (retryOnNextOpenRef.current) {
+        retryOnNextOpenRef.current = false;
+        // Defer one tick so the hook state is settled before re-sending.
+        setTimeout(() => {
+          retryLastMessageInternalRef.current?.();
+        }, 0);
       }
     };
 
@@ -746,19 +769,23 @@ export function useAgentChat(sessionId = 'default') {
 
   // --- Send message ---
 
-  const sendMessage = useCallback((text: string, imageDataUri?: string) => {
+  const sendMessageInternal = useCallback((text: string, imageDataUri: string | undefined, options: SendMessageOptions) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       setError('未连接，请稍后重试');
-      return;
+      return false;
     }
 
-    if (pendingApproval) {
+    if (pendingApprovalRef.current) {
       setError('请先确认或拒绝当前档案同步请求');
-      return;
+      return false;
     }
 
-    if (!text.trim()) return;
+    if (!text.trim()) return false;
+
+    const allowProfileSync = options.allowProfileSync ?? true;
+    const now = Date.now();
+    const userMessageId = (options.userMessageId && options.userMessageId.trim()) ? options.userMessageId.trim() : `${now}-user`;
 
     // Reset state
     setError(null);
@@ -767,12 +794,13 @@ export function useAgentChat(sessionId = 'default') {
     setSupplements([]);
     routingInfoRef.current = null;
     supplementsRef.current = [];
-    setWritebackSummary(null);
+    if (options.appendUserMessage !== false) {
+      setWritebackSummary(null);
+    }
     setIsLoading(true);
 
-    const now = Date.now();
     const userMessage: ChatMessage = {
-      id: `${now}-user`,
+      id: userMessageId,
       role: 'user',
       content: text,
       image: imageDataUri,
@@ -786,11 +814,14 @@ export function useAgentChat(sessionId = 'default') {
     };
     currentAssistantIdRef.current = assistantId;
 
-    setMessages((prev) => [...prev, userMessage, assistantPlaceholder]);
+    setMessages((prev) => {
+      if (options.appendUserMessage === false) return [...prev, assistantPlaceholder];
+      return [...prev, userMessage, assistantPlaceholder];
+    });
 
     // Build message in UIMessage format for AIChatAgent
     // AIChatAgent's autoTransformMessages handles both legacy and UIMessage formats
-    const msgId = `msg-${now}`;
+    const msgId = userMessageId;
     const parts: Array<Record<string, string>> = [];
     if (imageDataUri) {
       parts.push({ type: 'file', url: imageDataUri, mediaType: 'image/jpeg' });
@@ -799,6 +830,14 @@ export function useAgentChat(sessionId = 'default') {
 
     // AIChatAgent expects: { type: "cf_agent_use_chat_request", id, init: { method: "POST", body: stringified JSON } }
     const requestId = `req-${now}-${Math.random().toString(36).slice(2, 8)}`;
+
+    lastSentRef.current = {
+      text,
+      imageDataUri,
+      allowProfileSync,
+      userMessageId,
+    };
+
     ws.send(JSON.stringify({
       type: 'cf_agent_use_chat_request',
       id: requestId,
@@ -810,11 +849,60 @@ export function useAgentChat(sessionId = 'default') {
             role: 'user',
             parts,
           }],
-          allow_profile_sync: true,
+          allow_profile_sync: allowProfileSync,
         }),
       },
     }));
-  }, [pendingApproval]);
+
+    return true;
+  }, []);
+
+  const sendMessage = useCallback((text: string, imageDataUri?: string) => {
+    void sendMessageInternal(text, imageDataUri, { appendUserMessage: true, allowProfileSync: true });
+  }, [sendMessageInternal]);
+
+  const retryLastMessageInternal = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      retryOnNextOpenRef.current = true;
+      setError(null);
+      void connect();
+      return;
+    }
+
+    const last = lastSentRef.current;
+    if (!last) {
+      // 没有可重试的消息时，尝试恢复流（对断线恢复更友好）。
+      setError(null);
+      try {
+        ws.send(JSON.stringify({ type: 'cf_agent_stream_resume_request' }));
+      } catch {
+        // ignore resume failure
+      }
+      return;
+    }
+
+    // 若刚完成写回提交，则“重试”默认只重试生成，不再重复触发写回（避免重复修改数据）。
+    const now = Date.now();
+    const allowProfileSync =
+      writebackSummary && (now - lastWritebackCommitAtRef.current < 30_000)
+        ? false
+        : last.allowProfileSync;
+
+    void sendMessageInternal(last.text, last.imageDataUri, {
+      appendUserMessage: false,
+      allowProfileSync,
+      userMessageId: last.userMessageId,
+    });
+  }, [connect, sendMessageInternal, writebackSummary]);
+
+  useEffect(() => {
+    retryLastMessageInternalRef.current = retryLastMessageInternal;
+  }, [retryLastMessageInternal]);
+
+  const retryLastMessage = useCallback(() => {
+    retryLastMessageInternalRef.current?.();
+  }, []);
 
   // --- Tool approval ---
 
@@ -899,6 +987,7 @@ export function useAgentChat(sessionId = 'default') {
     writebackSummary,
     pendingApproval,
     sendMessage,
+    retryLastMessage,
     approveToolCall,
     rejectToolCall,
     clearMessages,
