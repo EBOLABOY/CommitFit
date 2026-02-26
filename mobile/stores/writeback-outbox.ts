@@ -83,48 +83,65 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
         }));
 
         try {
-          const res = await api.commitWriteback({
-            draft_id: current.draft_id,
-            payload: current.payload,
-            context_text: current.context_text,
-          });
+          const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+          // 202(pending) 是幂等锁常见形态：客户端应轮询重试，直到 success/failed。
+          const pollDelaysMs = [600, 1000, 1600, 2600, 4200, 6800];
 
-          if (!res.success) {
-            throw new Error(res.error || '同步失败');
-          }
+          for (let poll = 0; poll <= pollDelaysMs.length; poll += 1) {
+            const res = await api.commitWriteback({
+              draft_id: current.draft_id,
+              payload: current.payload,
+              context_text: current.context_text,
+            });
 
-          const data = res.data as unknown;
-          if (!isPlainObject(data)) {
-            throw new Error('同步返回格式错误');
-          }
+            if (!res.success) {
+              throw new Error(res.error || '同步失败');
+            }
 
-          const status = typeof data.status === 'string' ? data.status : '';
-          if (status === 'success') {
-            const summaryRaw = data.summary as unknown;
-            if (!isPlainObject(summaryRaw)) {
-              // 允许服务端不返回 summary（例如并发 pending -> success 的极端情况）
-              set((state) => ({ ...state, drafts: state.drafts.filter((d) => d.draft_id !== draftId) }));
+            const data = res.data as unknown;
+            if (!isPlainObject(data)) {
+              throw new Error('同步返回格式错误');
+            }
+
+            const status = typeof data.status === 'string' ? data.status : '';
+            if (status === 'success') {
+              const summaryRaw = data.summary as unknown;
+              if (!isPlainObject(summaryRaw)) {
+                // 允许服务端不返回 summary（例如并发 pending -> success 的极端情况）
+                set((state) => ({ ...state, drafts: state.drafts.filter((d) => d.draft_id !== draftId) }));
+                return null;
+              }
+
+              const summary = summaryRaw as unknown as OrchestrateAutoWriteSummary;
+              set((state) => ({
+                ...state,
+                drafts: state.drafts.filter((d) => d.draft_id !== draftId),
+                lastCommitted: { draft_id: draftId, summary, at: Date.now() },
+              }));
+              return summary;
+            }
+
+            if (status === 'pending') {
+              if (poll < pollDelaysMs.length) {
+                // eslint-disable-next-line no-await-in-loop
+                await sleep(pollDelaysMs[poll]!);
+                continue;
+              }
+              set((state) => ({
+                ...state,
+                drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending' } : d)),
+              }));
               return null;
             }
 
-            const summary = summaryRaw as unknown as OrchestrateAutoWriteSummary;
-            set((state) => ({
-              ...state,
-              drafts: state.drafts.filter((d) => d.draft_id !== draftId),
-              lastCommitted: { draft_id: draftId, summary, at: Date.now() },
-            }));
-            return summary;
+            throw new Error(typeof data.error === 'string' && data.error ? data.error : '同步失败');
           }
 
-          if (status === 'pending') {
-            set((state) => ({
-              ...state,
-              drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending' } : d)),
-            }));
-            return null;
-          }
-
-          throw new Error(typeof data.error === 'string' && data.error ? data.error : '同步失败');
+          set((state) => ({
+            ...state,
+            drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending' } : d)),
+          }));
+          return null;
         } catch (error) {
           const message = error instanceof Error ? error.message : '同步失败';
           set((state) => ({

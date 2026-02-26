@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getToken } from '../services/api';
 import { API_BASE_URL, SUPERVISOR_AGENT_NAMESPACE } from '../constants';
 import { useWritebackOutboxStore } from '../stores/writeback-outbox';
@@ -48,6 +49,32 @@ type LastSentMessage = {
   allowProfileSync: boolean;
   userMessageId: string;
 };
+
+type PersistedChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  image?: string;
+  primaryRole?: AIRole;
+  supplements?: SSESupplementEvent[];
+  routingInfo?: SSERoutingEvent;
+};
+
+type PersistedChatHistory = {
+  v: number;
+  userId: string;
+  sessionId: string;
+  savedAt: number;
+  messages: PersistedChatMessage[];
+};
+
+const CHAT_HISTORY_VERSION = 1;
+const MAX_LOCAL_HISTORY_MESSAGES = 500;
+const PERSIST_DEBOUNCE_MS = 450;
+
+function makeChatHistoryKey(userId: string, sessionId: string): string {
+  return `lianlema-chat-history:v${CHAT_HISTORY_VERSION}:${userId}:${sessionId}`;
+}
 
 // --- WebSocket URL ---
 
@@ -208,12 +235,24 @@ function extractMessageText(message: IncomingUIMessage): string {
   return typeof message.content === 'string' ? message.content : '';
 }
 
+function extractMessageImage(message: IncomingUIMessage): string | undefined {
+  // UIMessage parts may include { type: "file", url: "..." } for images.
+  if (!Array.isArray(message.parts)) return undefined;
+  for (const part of message.parts as Array<Record<string, unknown>>) {
+    if (part?.type !== 'file') continue;
+    const url = part.url;
+    if (typeof url === 'string' && url.trim()) return url.trim();
+  }
+  return undefined;
+}
+
 function toChatMessage(message: IncomingUIMessage): ChatMessage | null {
   if (message.role !== 'user' && message.role !== 'assistant') return null;
   return {
     id: message.id,
     role: message.role as 'user' | 'assistant',
     content: extractMessageText(message),
+    image: extractMessageImage(message),
   };
 }
 
@@ -229,6 +268,11 @@ export function useAgentChat(sessionId = 'default') {
   const [supplements, setSupplements] = useState<SSESupplementEvent[]>([]);
   const [writebackSummary, setWritebackSummary] = useState<OrchestrateAutoWriteSummary | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingToolApproval | null>(null);
+
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Local-First：写回工具不直接写远端，而是产出草稿写入 Outbox，再通过 HTTP commit 幂等提交
   const enqueueWritebackDraft = useWritebackOutboxStore((s) => s.enqueueDraft);
@@ -250,9 +294,156 @@ export function useAgentChat(sessionId = 'default') {
   const retryOnNextOpenRef = useRef(false);
   const retryLastMessageInternalRef = useRef<(() => void) | null>(null);
 
+  // Chat history: local-first cache (AsyncStorage) + remote DO sync.
+  const localHistoryKeyRef = useRef<string | null>(null);
+  const hasHydratedLocalHistoryRef = useRef(false);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     pendingApprovalRef.current = pendingApproval;
   }, [pendingApproval]);
+
+  // --- Local history hydrate/persist ---
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const token = await getToken();
+      if (!token) {
+        hasHydratedLocalHistoryRef.current = true;
+        return;
+      }
+
+      const payload = decodeJwtPayload(token);
+      if (!payload) {
+        hasHydratedLocalHistoryRef.current = true;
+        return;
+      }
+
+      const uid = payload.sub || payload.userId || payload.user_id;
+      if (typeof uid !== 'string' || !uid.trim()) {
+        hasHydratedLocalHistoryRef.current = true;
+        return;
+      }
+
+      const userId = uid.trim();
+      userIdRef.current = userId;
+
+      const key = makeChatHistoryKey(userId, sessionId);
+      localHistoryKeyRef.current = key;
+
+      try {
+        const raw = await AsyncStorage.getItem(key);
+        if (cancelled) return;
+        if (!raw) {
+          hasHydratedLocalHistoryRef.current = true;
+          return;
+        }
+
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = null;
+        }
+
+        if (!isPlainObject(parsed)) {
+          hasHydratedLocalHistoryRef.current = true;
+          return;
+        }
+
+        const obj = parsed as Partial<PersistedChatHistory>;
+        if (obj.v !== CHAT_HISTORY_VERSION) {
+          hasHydratedLocalHistoryRef.current = true;
+          return;
+        }
+        if (obj.userId !== userId || obj.sessionId !== sessionId) {
+          hasHydratedLocalHistoryRef.current = true;
+          return;
+        }
+        if (!Array.isArray(obj.messages)) {
+          hasHydratedLocalHistoryRef.current = true;
+          return;
+        }
+
+        const restored: ChatMessage[] = obj.messages
+          .filter((m) =>
+            isPlainObject(m)
+            && typeof m.id === 'string'
+            && (m.role === 'user' || m.role === 'assistant')
+            && typeof m.content === 'string'
+          )
+          .map((m) => ({
+            id: (m.id as string),
+            role: (m.role as 'user' | 'assistant'),
+            content: (m.content as string),
+            image: typeof (m as Record<string, unknown>).image === 'string' ? ((m as Record<string, unknown>).image as string) : undefined,
+            primaryRole: (m as Record<string, unknown>).primaryRole as AIRole | undefined,
+            supplements: (m as Record<string, unknown>).supplements as SSESupplementEvent[] | undefined,
+            routingInfo: (m as Record<string, unknown>).routingInfo as SSERoutingEvent | undefined,
+            isStreaming: false,
+          }))
+          .slice(-MAX_LOCAL_HISTORY_MESSAGES);
+
+        // 若远端 WS 已先恢复出消息，则不覆盖；否则用本地缓存秒开。
+        if (restored.length > 0 && messagesRef.current.length === 0) {
+          setMessages(restored);
+        }
+      } finally {
+        hasHydratedLocalHistoryRef.current = true;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!hasHydratedLocalHistoryRef.current) return;
+    const key = localHistoryKeyRef.current;
+    const userId = userIdRef.current;
+    if (!key || !userId) return;
+
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+
+    persistTimerRef.current = setTimeout(() => {
+      const snapshot = (messagesRef.current || [])
+        .map((m): PersistedChatMessage => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          image: m.image,
+          primaryRole: m.primaryRole,
+          supplements: m.supplements,
+          routingInfo: m.routingInfo,
+        }))
+        .slice(-MAX_LOCAL_HISTORY_MESSAGES);
+
+      const payload: PersistedChatHistory = {
+        v: CHAT_HISTORY_VERSION,
+        userId,
+        sessionId,
+        savedAt: Date.now(),
+        messages: snapshot,
+      };
+
+      AsyncStorage.setItem(key, JSON.stringify(payload)).catch(() => {
+        // ignore persistence failures
+      });
+    }, PERSIST_DEBOUNCE_MS);
+
+    return () => {
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [messages, sessionId]);
 
   // --- Connect ---
 
@@ -294,6 +485,7 @@ export function useAgentChat(sessionId = 'default') {
       setError('认证信息无效，请重新登录');
       return;
     }
+    localHistoryKeyRef.current = makeChatHistoryKey(userId, sessionId);
     const wsUrl = `${getWSBaseURL()}/agents/${SUPERVISOR_AGENT_NAMESPACE}/${encodeURIComponent(userId)}?token=${encodeURIComponent(token)}&sid=${encodeURIComponent(sessionId)}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
@@ -414,14 +606,54 @@ export function useAgentChat(sessionId = 'default') {
         .map((m) => toChatMessage(m))
         .filter((m): m is ChatMessage => m !== null);
 
-      if (converted.length > 0) {
-        setMessages((prev) => {
-          // Merge: add only messages that aren't already in local state
-          const existingIds = new Set(prev.map((m) => m.id));
-          const newMsgs = converted.filter((m) => !existingIds.has(m.id));
-          return newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
-        });
+      // 空快照 = 远端已清空；本地也应同步清空（除非正在流式中，极端情况下由后续事件修正）。
+      if (converted.length === 0) {
+        setMessages([]);
+        setRoutingInfo(null);
+        setSupplements([]);
+        routingInfoRef.current = null;
+        supplementsRef.current = [];
+        setStreamStatus('');
+        currentAssistantIdRef.current = null;
+        const key = localHistoryKeyRef.current;
+        if (key) {
+          AsyncStorage.removeItem(key).catch(() => {
+            // ignore
+          });
+        }
+        return;
       }
+
+      setMessages((prev) => {
+        const serverIds = new Set(converted.map((m) => m.id));
+        const prevById = new Map(prev.map((m) => [m.id, m] as const));
+
+        // 以服务端顺序为准：先按 server snapshot 排列，再追加本地仅存在的（通常是刚发送但尚未广播的）。
+        const next: ChatMessage[] = [];
+        for (const sm of converted) {
+          const local = prevById.get(sm.id);
+          if (!local) {
+            next.push({ ...sm, isStreaming: false });
+            continue;
+          }
+          next.push({
+            id: sm.id,
+            role: sm.role,
+            content: sm.content || local.content,
+            image: sm.image || local.image,
+            isStreaming: false,
+            primaryRole: local.primaryRole,
+            supplements: local.supplements,
+            routingInfo: local.routingInfo,
+          });
+        }
+
+        for (const m of prev) {
+          if (!serverIds.has(m.id)) next.push(m);
+        }
+
+        return next;
+      });
       return;
     }
 
@@ -948,6 +1180,12 @@ export function useAgentChat(sessionId = 'default') {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'cf_agent_chat_clear' }));
+    }
+    const key = localHistoryKeyRef.current;
+    if (key) {
+      AsyncStorage.removeItem(key).catch(() => {
+        // ignore
+      });
     }
     setMessages([]);
     setRoutingInfo(null);

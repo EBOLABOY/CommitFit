@@ -46,6 +46,39 @@ const INLINE_THRESHOLD = 500 * 1024;
 
 const MESSAGE_IMAGE_WIDTH = Math.min(Dimensions.get('window').width * 0.58, 280);
 
+function normalizeApprovalDecision(raw: string): 'approve' | 'reject' | null {
+  const t = (raw || '').trim().replace(/\s+/g, '').toLowerCase();
+  if (!t) return null;
+
+  const approve = new Set([
+    '确认',
+    '确定',
+    '同意',
+    '是',
+    '好',
+    '好的',
+    'ok',
+    'okay',
+    'yes',
+    'y',
+    '确认同步',
+    '确认删除',
+  ]);
+  const reject = new Set([
+    '取消',
+    '拒绝',
+    '否',
+    '不要',
+    '算了',
+    'no',
+    'n',
+  ]);
+
+  if (approve.has(t)) return 'approve';
+  if (reject.has(t)) return 'reject';
+  return null;
+}
+
 const SUGGESTIONS = [
   '左膝疼，深蹲时加重，怎么处理？',
   '帮我分析一下这张餐食图片',
@@ -278,6 +311,33 @@ export default function AIChatScreen() {
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
+    // Tool approval（官方 WS 协议）：不要排队，直接在当前流中发送确认/取消。
+    if (pendingApproval) {
+      if (pendingImage) {
+        Toast.show({ type: 'info', text1: '需要确认同步', text2: '请先回复“确认”或“取消”，再发送图片/消息' });
+        return;
+      }
+
+      const decision = normalizeApprovalDecision(text);
+      if (decision === 'approve') {
+        approveToolCall(pendingApproval.toolCallId);
+        setInput('');
+        setPendingImage(null);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        return;
+      }
+      if (decision === 'reject') {
+        rejectToolCall(pendingApproval.toolCallId);
+        setInput('');
+        setPendingImage(null);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        return;
+      }
+
+      Toast.show({ type: 'info', text1: '需要确认同步', text2: '请回复“确认”或“取消”' });
+      return;
+    }
+
     // Prepare image data URI
     let imageDataUri: string | undefined;
     if (pendingImage) {
@@ -305,7 +365,7 @@ export default function AIChatScreen() {
     } else {
       sendMessage(text, imageDataUri);
     }
-  }, [isLoading, input, pendingImage, sendMessage]);
+  }, [isLoading, input, pendingImage, sendMessage, pendingApproval, approveToolCall, rejectToolCall]);
 
   const writebackText = useMemo(() => {
     if (!writebackSummary) return '';
@@ -517,6 +577,28 @@ export default function AIChatScreen() {
         </View>
       )}
 
+      {/* Tool approval (inline, no modal) */}
+      {!!pendingApproval && (
+        <View style={[styles.approvalBanner, { backgroundColor: Colors.warningLight ?? Colors.primaryLight, borderColor: (Colors.warning ?? Colors.primary) + '40' }]}>
+          <Ionicons name="help-circle-outline" size={16} color={Colors.warning ?? Colors.primary} />
+          <Text style={[styles.approvalBannerText, { color: Colors.text }]} numberOfLines={2}>
+            {(pendingApproval.summaryText || '需要确认同步操作') + '（回复“确认”或“取消”）'}
+          </Text>
+          <TouchableOpacity
+            style={[styles.approvalAction, { borderColor: Colors.border }]}
+            onPress={() => rejectToolCall(pendingApproval.toolCallId)}
+          >
+            <Text style={[styles.approvalActionText, { color: Colors.textSecondary }]}>取消</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.approvalAction, styles.approvalActionPrimary, { backgroundColor: Colors.primary }]}
+            onPress={() => approveToolCall(pendingApproval.toolCallId)}
+          >
+            <Text style={[styles.approvalActionText, { color: '#FFFFFF' }]}>确认</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Writeback banner */}
       {!!writebackText && !isLoading && (
         <View style={[styles.writebackBanner, { backgroundColor: Colors.successLight, borderColor: Colors.success + '40' }]}>
@@ -559,8 +641,9 @@ export default function AIChatScreen() {
         <TextInput
           style={[styles.input, { backgroundColor: Colors.background, color: Colors.text }]}
           placeholder={
-            queuedMessage ? '已排队，AI 完成后自动发送...' :
-              pendingImage ? '描述一下这张图片...' : '输入你的问题...'
+            pendingApproval ? '需要确认：回复“确认”或“取消”以继续...' :
+              queuedMessage ? '已排队，AI 完成后自动发送...' :
+                pendingImage ? '描述一下这张图片...' : '输入你的问题...'
           }
           placeholderTextColor={Colors.textTertiary}
           value={input}
@@ -590,35 +673,7 @@ export default function AIChatScreen() {
       </View>
 
       {/* Tool Approval Modal */}
-      <Modal visible={!!pendingApproval} transparent animationType="fade">
-        <View style={styles.approvalOverlay}>
-          <View style={[styles.approvalCard, { backgroundColor: Colors.surface }]}>
-            <Text style={[styles.approvalTitle, { color: Colors.text }]}>确认同步数据？</Text>
-            <Text style={[styles.approvalDescription, { color: Colors.textSecondary }]}>
-              {pendingApproval?.summaryText || '是否将识别到的健康数据同步到你的档案？'}
-            </Text>
-            <View style={styles.approvalButtons}>
-              <TouchableOpacity
-                style={[styles.approvalButton, styles.approvalReject, { borderColor: Colors.border }]}
-                onPress={() => pendingApproval && rejectToolCall(pendingApproval.toolCallId)}
-              >
-                <Text style={[styles.approvalButtonText, { color: Colors.textSecondary }]}>取消</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.approvalButton, styles.approvalApprove, { backgroundColor: Colors.primary }]}
-                onPress={() => {
-                  if (pendingApproval) {
-                    approveToolCall(pendingApproval.toolCallId);
-                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                  }
-                }}
-              >
-                <Text style={[styles.approvalButtonText, { color: '#FFFFFF' }]}>确认同步</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* 已按官方推荐的 Tool Approval 协议改为内联 Banner + 对话输入确认，避免弹窗打断 */}
 
       {/* Full-screen image preview */}
       <Modal visible={!!previewImage} transparent animationType="fade" onRequestClose={() => setPreviewImage(null)}>
@@ -747,6 +802,33 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
+  // Tool approval (inline)
+  approvalBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+  },
+  approvalBannerText: { flex: 1, fontSize: FontSize.xs },
+  approvalAction: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+  },
+  approvalActionPrimary: {
+    borderWidth: 0,
+  },
+  approvalActionText: {
+    fontSize: FontSize.xs,
+    fontWeight: '700',
+  },
+
   // 排队中 Banner
   queueBanner: {
     flexDirection: 'row',
@@ -799,45 +881,6 @@ const styles = StyleSheet.create({
     maxHeight: 100,
   },
   sendButton: { width: 38, height: 38, borderRadius: Radius.full, justifyContent: 'center', alignItems: 'center' },
-
-  // Tool approval modal
-  approvalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: Spacing.xl,
-  },
-  approvalCard: {
-    width: '100%',
-    maxWidth: 360,
-    borderRadius: Radius.xl,
-    padding: Spacing.xxl,
-    ...Shadows.lg,
-  },
-  approvalTitle: {
-    fontSize: FontSize.lg,
-    fontWeight: '700',
-    marginBottom: Spacing.md,
-    textAlign: 'center',
-  },
-  approvalDescription: {
-    fontSize: FontSize.md,
-    lineHeight: 22,
-    marginBottom: Spacing.xxl,
-    textAlign: 'center',
-  },
-  approvalButtons: { flexDirection: 'row', gap: Spacing.md },
-  approvalButton: {
-    flex: 1,
-    paddingVertical: Spacing.md,
-    borderRadius: Radius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  approvalReject: { borderWidth: 1 },
-  approvalApprove: {},
-  approvalButtonText: { fontSize: FontSize.md, fontWeight: '600' },
 
   // Full-screen image modal
   modalOverlay: {
