@@ -5,9 +5,33 @@ import { jwtVerify } from 'jose';
 import type { AIRole } from '../../../shared/types';
 import type { Bindings } from '../types';
 import { getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
-import { syncProfileToolSchema } from './sync-profile-tool';
 import { queryUserDataToolSchema } from './query-user-data-tool';
 import { delegateGenerateToolSchema } from './delegate-generate-tool';
+import {
+  userPatchToolSchema,
+  profilePatchToolSchema,
+  conditionsUpsertToolSchema,
+  conditionsReplaceAllToolSchema,
+  conditionsDeleteToolSchema,
+  conditionsClearAllToolSchema,
+  trainingGoalsUpsertToolSchema,
+  trainingGoalsReplaceAllToolSchema,
+  trainingGoalsDeleteToolSchema,
+  trainingGoalsClearAllToolSchema,
+  healthMetricsCreateToolSchema,
+  healthMetricsUpdateToolSchema,
+  healthMetricsDeleteToolSchema,
+  trainingPlanSetToolSchema,
+  trainingPlanDeleteToolSchema,
+  nutritionPlanSetToolSchema,
+  nutritionPlanDeleteToolSchema,
+  supplementPlanSetToolSchema,
+  supplementPlanDeleteToolSchema,
+  dietRecordsCreateToolSchema,
+  dietRecordsDeleteToolSchema,
+  dailyLogUpsertToolSchema,
+  dailyLogDeleteToolSchema,
+} from './writeback-tools';
 import type {
   CustomBroadcast,
   RoutingBroadcast,
@@ -19,7 +43,6 @@ import {
   saveOrchestrateAssistantMessage,
   saveOrchestrateUserMessage,
   applyAutoWriteback,
-  sanitizeWritebackPayloadForContext,
   recordWritebackAudit,
 } from '../services/orchestrator';
 import { getUserContext, buildContextForRole, estimateTokens } from '../services/context';
@@ -117,26 +140,6 @@ function resolveActiveRole(value: string | undefined): AIRole {
   return 'trainer';
 }
 
-function detectDirectClearWritebackTarget(userText: string): 'conditions' | 'training_goals' | null {
-  const t = userText.trim();
-  if (!t) return null;
-  // 账号/密码类操作永远不在此处做直写
-  if (/(账号|账户|密码|口令|邮箱|email|注销|删除账号|删除账户)/i.test(t)) return null;
-
-  const hasVerb = /(清空|清除|删除|移除|重置|清理)/.test(t);
-  if (!hasVerb) return null;
-
-  // 负向语气：例如“不要清空伤病记录”
-  if (/(不要|别|不想|不用|先别)/.test(t)) return null;
-
-  // 纯提问（“怎么清空/如何删除”）不直写，让模型先解释或追问确认
-  if (/(怎么|如何)/.test(t) && !/(帮我|请|麻烦)/.test(t)) return null;
-
-  if (/(伤病记录|伤病)/.test(t)) return 'conditions';
-  if (/(训练目标|目标)/.test(t)) return 'training_goals';
-  return null;
-}
-
 function extractImageUrl(msg: AgentMessageLike | undefined): string | null {
   if (!msg?.parts || !Array.isArray(msg.parts)) return null;
   for (const part of msg.parts) {
@@ -200,10 +203,10 @@ const INCOMPLETE_TOOL_STATES = new Set([
 /**
  * 清理消息历史中「孤立的 tool-invocation」part，防止 convertToModelMessages 报错。
  *
- * 问题根因（旧架构）：
- *   sync_profile 工具设置了 needsApproval: true（远端直写 + 人工确认），AIChatAgent 会在
- *   approval-requested 状态时将 assistant 消息持久化到 SQLite。
- *   若用户此时关闭 App 或断网，tool_result 永远不会写回。
+ * 问题根因：
+ *   对于设置了 needsApproval 的工具（通常是 destructive 写操作），AIChatAgent 可能在
+ *   approval-requested 状态时就把 assistant 消息持久化到 SQLite。
+ *   若用户此时关闭 App/断网，tool_result 永远不会写回。
  *   下次发消息时 convertToModelMessages 检测到"有 tool_call 无 tool_result"
  *   便抛出 "Tool result is missing for tool call ..." 错误。
  *
@@ -342,55 +345,6 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         // keep chat flow resilient even if audit write fails
       }
 
-      // 直写兜底：对于“清空/删除全部”这类明确、可验证、强确定性的操作，直接落库并短路返回，
-      // 避免 LLM 口头承诺却未调用工具，或 LLM 调用失败导致用户一直 loading。
-      const directClearTarget = detectDirectClearWritebackTarget(userText);
-      if (directClearTarget) {
-        if (!allowProfileSync) {
-          return textResponse('当前会话未启用档案同步（allow_profile_sync=false），无法执行清空操作。');
-        }
-
-        const label = directClearTarget === 'conditions' ? '伤病记录' : '训练目标';
-        const labelShort = directClearTarget === 'conditions' ? '伤病' : '目标';
-        this.broadcastCustom({ type: 'status', message: `清空${labelShort}` });
-
-        try {
-          const payload = directClearTarget === 'conditions'
-            ? { conditions_mode: 'clear_all' as const }
-            : { training_goals_mode: 'clear_all' as const };
-          const summary = await applyAutoWriteback(this.env.DB, userId, payload, { contextText: userText });
-          const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
-          this.broadcastCustom(syncBroadcast);
-
-          try {
-            await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
-          } catch { /* ignore */ }
-
-          const deletedCount = directClearTarget === 'conditions'
-            ? (summary.conditions_deleted || 0)
-            : (summary.training_goals_deleted || 0);
-          const assistantText = deletedCount > 0
-            ? `已按你的要求清空${label}（共删除 ${deletedCount} 条）。`
-            : `你的${label}本来就是空的，无需清空。`;
-
-          try {
-            await saveOrchestrateAssistantMessage(this.env.DB, userId, assistantText, {
-              architecture: 'direct_clear_writeback',
-              target: directClearTarget,
-              deleted_count: deletedCount,
-            });
-          } catch { /* ignore */ }
-
-          return textResponse(assistantText);
-        } catch (error) {
-          const errMsg = error instanceof Error ? error.message : '清空写回失败';
-          try {
-            await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
-          } catch { /* ignore */ }
-          return textResponse(`[错误] ${errMsg}`);
-        }
-      }
-
       // 2. Build history for routing (last 16 messages as simple text)
       const history = this.messages
         .slice(-16)
@@ -445,8 +399,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const contextStr = buildContextForRole(activeRole, userContext);
       const architectureGuidanceLines: string[] = [
         [
-          '工作约定：计划/方案/图片分析可使用 delegate_generate；需要保存/更新时先 query_user_data 查看同日旧内容并决定覆盖或合并，再用 sync_profile 写回（同日只保留一份）。',
-          '写回硬约束：凡是对用户数据的新增/删除/修改/清空/保存/同步请求，必须调用 sync_profile 工具执行；未调用工具前，禁止在文字中宣称“已删除/已清空/已保存/已同步”。',
+          '工作约定：计划/方案/图片分析可使用 delegate_generate；需要保存/更新时先 query_user_data 拉取旧内容并决定覆盖或合并，再用对应写回工具写回（写回工具按模块拆分）。',
+          '写回硬约束：凡是对用户数据的新增/删除/修改/清空/保存/同步请求，必须调用对应写回工具执行；未调用工具前，禁止在文字中宣称“已删除/已清空/已保存/已同步”。',
+          '工具选择：非破坏性更新优先用 *_patch / *_upsert / *_set；删除/清空使用 *_delete / *_clear_all（会要求用户确认）。',
           '禁止账号/密码类操作；禁止把客套话写入数据字段。',
           '对外沟通：不要提及模型切换、路由、委托或工具实现细节；只用用户可理解的语言描述你正在做的事。',
         ].join('\n'),
@@ -942,80 +897,359 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         },
       });
 
-      const syncProfileTool = tool({
+      const toSummaryText = (value: unknown, fallback: string): string => {
+        if (typeof value === 'string') {
+          const t = value.trim();
+          if (t) return t.length > 200 ? t.slice(0, 200) : t;
+        }
+        return fallback;
+      };
+
+      const applyOrDraftWriteback = async (
+        payload: Record<string, unknown>,
+        summaryText: string
+      ): Promise<Record<string, unknown>> => {
+        if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
+          return {
+            success: false,
+            error: '本次同步请求未包含可写回内容，请明确你要新增/修改/删除的内容。',
+          };
+        }
+
+        if (!isLocalFirstWriteback) {
+          const summary = await applyAutoWriteback(this.env.DB, userId, payload as any, { contextText: userText });
+          const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
+          this.broadcastCustom(syncBroadcast);
+          try {
+            await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
+          } catch { /* ignore */ }
+          return { success: true, summary_text: summaryText, changes: summary };
+        }
+
+        const draftId = crypto.randomUUID();
+        return {
+          success: true,
+          draft_id: draftId,
+          summary_text: summaryText,
+          payload,
+          context_text: userText,
+        };
+      };
+
+      // --- Writeback tools (按资源拆分，避免跨模块误写/误删) ---
+
+      const userPatchTool = tool({
         description: [
-          '当用户在对话中明确给出可写回的数据/操作（身体档案、伤病记录、训练目标、训练计划、饮食记录、日志等）时调用，用于把信息同步到用户数据。',
-          '硬约束：除非你已调用 sync_profile 并拿到成功结果（或草稿 draft_id），否则不要在文字中说“已删除/已清空/已保存/已同步”。',
-          '重要：写回内容必须来自用户原话/近期对话中的事实，不要把助手的确认语、客套话（如“好的/已记录/明白了”）写入任何字段。',
-          '清空伤病记录：设置 conditions_mode="clear_all"，不要传 conditions。',
-          '清空训练目标：设置 training_goals_mode="clear_all"，不要编造 training_goals。',
-          '先清空再写入：分别使用 *_mode="replace_all" 并提供对应列表。',
-          '按 id 删除指定条目：使用 *_delete_ids（例如 conditions_delete_ids、training_goals_delete_ids、health_metrics_delete_ids）。',
-          '当你刚生成训练计划/饮食方案/补剂方案且用户希望保存/替换/更新时，使用对应的 *_plan 写回；如同日已存在，先用 query_user_data 拉取旧内容，再决定覆盖或合并（最终同日只保留一份）。',
-          '删除某天训练计划：设置 training_plan_delete_date="YYYY-MM-DD"（也可以用“今天/明天/本周”让系统推断）。',
-          '删除饮食记录：使用 diet_records_delete（优先 id；否则 meal_type + record_date）。',
+          '更新用户昵称/头像（users）。',
           '禁止操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
-          '当你确定需要写回时即可调用（可在生成结果后、最终答复前调用）。',
-          '示例（清空伤病记录）：{"conditions_mode":"clear_all","summary_text":"清空伤病记录"}',
-          '示例（清空训练目标）：{"training_goals_mode":"clear_all","summary_text":"清空训练目标"}',
+          '重要：除非你已调用该工具并得到 success=true，否则不要说“已保存/已同步”。',
         ].join('\n'),
-        inputSchema: syncProfileToolSchema,
-        // Local-First：工具仅生成草稿，不直接写远端，因此不需要人工审批。
-        // remote 模式保留旧行为（直写远端 + needsApproval）以便回滚/灰度。
+        inputSchema: userPatchToolSchema,
         needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { summary_text, ...writebackPayloadRaw } = args;
-            const { payload: writebackPayload, dropped } = sanitizeWritebackPayloadForContext(
-              writebackPayloadRaw as unknown as Record<string, unknown>,
-              userText
-            );
-            if (dropped.length > 0) {
-              console.warn('[SupervisorAgent] sync_profile payload sanitized:', {
-                dropped,
-                userId,
-              });
-            }
-            if (Object.keys(writebackPayload).length === 0) {
-              return {
-                success: false,
-                error: '本次同步请求未包含明确可写回的目标模块。请明确你要修改的内容，例如“新增伤病记录：…”。',
-              };
-            }
+          const patch: Record<string, unknown> = {};
+          if (args.nickname !== undefined) patch.nickname = args.nickname;
+          if (args.avatar_key !== undefined) patch.avatar_key = args.avatar_key;
+          const summaryText = toSummaryText(args.summary_text, '更新昵称/头像');
+          return applyOrDraftWriteback({ user: patch }, summaryText);
+        },
+      });
 
-            if (!isLocalFirstWriteback) {
-              const summary = await applyAutoWriteback(this.env.DB, userId, writebackPayload, {
-                contextText: userText,
-              });
-              const syncBroadcast: ProfileSyncResultBroadcast = {
-                type: 'profile_sync_result',
-                summary,
-              };
-              this.broadcastCustom(syncBroadcast);
-              try {
-                await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
-              } catch { /* ignore */ }
-              return { success: true, summary_text: args.summary_text, changes: summary };
-            }
+      const profilePatchTool = tool({
+        description: [
+          '更新身体档案（user_profiles）。可写字段：身高/体重/出生日期/性别/训练年限/训练目标。',
+          '禁止操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
+        ].join('\n'),
+        inputSchema: profilePatchToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const patch: Record<string, unknown> = {};
+          if (args.height !== undefined) patch.height = args.height;
+          if (args.weight !== undefined) patch.weight = args.weight;
+          if (args.birth_date !== undefined) patch.birth_date = args.birth_date;
+          if (args.gender !== undefined) patch.gender = args.gender;
+          if (args.training_years !== undefined) patch.training_years = args.training_years;
+          if (args.training_goal !== undefined) patch.training_goal = args.training_goal;
+          const summaryText = toSummaryText(args.summary_text, '更新身体档案');
+          return applyOrDraftWriteback({ profile: patch }, summaryText);
+        },
+      });
 
-            const draftId = crypto.randomUUID();
-            return {
-              success: true,
-              draft_id: draftId,
-              summary_text,
-              payload: writebackPayload,
-              context_text: userText,
-            };
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : '档案同步失败';
-            if (!isLocalFirstWriteback) {
-              try {
-                await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
-              } catch { /* ignore */ }
-            }
-            return { success: false, error: errMsg };
-          }
+      const conditionsUpsertTool = tool({
+        description: [
+          '新增/更新伤病记录（conditions）。',
+          '重要：写回内容必须来自用户原话/近期对话的事实，不要把客套话写入字段。',
+        ].join('\n'),
+        inputSchema: conditionsUpsertToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '同步伤病记录');
+          return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'upsert' }, summaryText);
+        },
+      });
+
+      const conditionsReplaceAllTool = tool({
+        description: [
+          '先清空再写入伤病记录（conditions），用于“把伤病记录整体替换为这份列表”。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: conditionsReplaceAllToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '替换全部伤病记录');
+          return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'replace_all' }, summaryText);
+        },
+      });
+
+      const conditionsDeleteTool = tool({
+        description: [
+          '按 id 删除伤病记录（conditions）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: conditionsDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除伤病记录');
+          return applyOrDraftWriteback({ conditions_delete_ids: args.ids }, summaryText);
+        },
+      });
+
+      const conditionsClearAllTool = tool({
+        description: [
+          '清空全部伤病记录（conditions）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: conditionsClearAllToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '清空伤病记录');
+          return applyOrDraftWriteback({ conditions_mode: 'clear_all' }, summaryText);
+        },
+      });
+
+      const trainingGoalsUpsertTool = tool({
+        description: [
+          '新增/合并训练目标（training_goals）。',
+          '重要：不要把“好的/已记录”等确认语写入目标。目标需来自用户原话/近期对话。',
+        ].join('\n'),
+        inputSchema: trainingGoalsUpsertToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '同步训练目标');
+          return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'upsert' }, summaryText);
+        },
+      });
+
+      const trainingGoalsReplaceAllTool = tool({
+        description: [
+          '先清空再写入训练目标（training_goals），用于“把训练目标整体替换为这份列表”。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: trainingGoalsReplaceAllToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '替换全部训练目标');
+          return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'replace_all' }, summaryText);
+        },
+      });
+
+      const trainingGoalsDeleteTool = tool({
+        description: [
+          '按 id 删除训练目标（training_goals）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: trainingGoalsDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除训练目标');
+          return applyOrDraftWriteback({ training_goals_delete_ids: args.ids }, summaryText);
+        },
+      });
+
+      const trainingGoalsClearAllTool = tool({
+        description: [
+          '清空全部训练目标（training_goals）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: trainingGoalsClearAllToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '清空训练目标');
+          return applyOrDraftWriteback({ training_goals_mode: 'clear_all' }, summaryText);
+        },
+      });
+
+      const healthMetricsCreateTool = tool({
+        description: '新增理化指标（health_metrics）。',
+        inputSchema: healthMetricsCreateToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '新增理化指标');
+          return applyOrDraftWriteback({ health_metrics: args.metrics }, summaryText);
+        },
+      });
+
+      const healthMetricsUpdateTool = tool({
+        description: '按 id 更新理化指标（health_metrics）。',
+        inputSchema: healthMetricsUpdateToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '更新理化指标');
+          return applyOrDraftWriteback({ health_metrics_update: args.updates }, summaryText);
+        },
+      });
+
+      const healthMetricsDeleteTool = tool({
+        description: [
+          '按 id 删除理化指标（health_metrics）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: healthMetricsDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除理化指标');
+          return applyOrDraftWriteback({ health_metrics_delete_ids: args.ids }, summaryText);
+        },
+      });
+
+      const trainingPlanSetTool = tool({
+        description: [
+          '写入训练计划（training_plans）。同一天只保留一份计划：写入会替换当天旧计划。',
+          '若用户说“今天/明天/本周”但未给出具体日期，可不填 plan_date，由系统从上下文推断。',
+        ].join('\n'),
+        inputSchema: trainingPlanSetToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '写入训练计划');
+          return applyOrDraftWriteback({
+            training_plan: {
+              plan_date: args.plan_date,
+              content: args.content,
+              notes: args.notes,
+              completed: args.completed,
+            },
+          }, summaryText);
+        },
+      });
+
+      const trainingPlanDeleteTool = tool({
+        description: [
+          '删除训练计划（training_plans）。同一天可能只有一份计划，删除按日期匹配。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: trainingPlanDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除训练计划');
+          const date = args.plan_date ?? '';
+          return applyOrDraftWriteback({ training_plan_delete_date: date }, summaryText);
+        },
+      });
+
+      const nutritionPlanSetTool = tool({
+        description: [
+          '写入饮食/营养方案（nutrition_plans，不含补剂）。同一天只保留一份方案：写入会替换当天旧方案。',
+        ].join('\n'),
+        inputSchema: nutritionPlanSetToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '写入营养方案');
+          return applyOrDraftWriteback({ nutrition_plan: { plan_date: args.plan_date, content: args.content } }, summaryText);
+        },
+      });
+
+      const nutritionPlanDeleteTool = tool({
+        description: [
+          '删除饮食/营养方案（nutrition_plans，不含补剂）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: nutritionPlanDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除营养方案');
+          const date = args.plan_date ?? '';
+          return applyOrDraftWriteback({ nutrition_plan_delete_date: date }, summaryText);
+        },
+      });
+
+      const supplementPlanSetTool = tool({
+        description: [
+          '写入补剂方案（nutrition_plans，content 会自动加上【补剂方案】前缀）。同一天只保留一份方案：写入会替换当天旧方案。',
+        ].join('\n'),
+        inputSchema: supplementPlanSetToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '写入补剂方案');
+          return applyOrDraftWriteback({ supplement_plan: { plan_date: args.plan_date, content: args.content } }, summaryText);
+        },
+      });
+
+      const supplementPlanDeleteTool = tool({
+        description: [
+          '删除补剂方案（nutrition_plans）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: supplementPlanDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除补剂方案');
+          const date = args.plan_date ?? '';
+          return applyOrDraftWriteback({ supplement_plan_delete_date: date }, summaryText);
+        },
+      });
+
+      const dietRecordsCreateTool = tool({
+        description: '新增饮食记录（diet_records）。',
+        inputSchema: dietRecordsCreateToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '新增饮食记录');
+          return applyOrDraftWriteback({ diet_records: args.records }, summaryText);
+        },
+      });
+
+      const dietRecordsDeleteTool = tool({
+        description: [
+          '删除饮食记录（diet_records）。优先按 id 删除；否则按 meal_type + record_date（可由上下文推断日期）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: dietRecordsDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除饮食记录');
+          return applyOrDraftWriteback({ diet_records_delete: args.deletes }, summaryText);
+        },
+      });
+
+      const dailyLogUpsertTool = tool({
+        description: '写入每日日志（daily_logs）：体重/睡眠/备注等。',
+        inputSchema: dailyLogUpsertToolSchema,
+        needsApproval: !isLocalFirstWriteback,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '写入每日日志');
+          return applyOrDraftWriteback({
+            daily_log: {
+              log_date: args.log_date,
+              weight: args.weight,
+              sleep_hours: args.sleep_hours,
+              sleep_quality: args.sleep_quality,
+              note: args.note,
+            },
+          }, summaryText);
+        },
+      });
+
+      const dailyLogDeleteTool = tool({
+        description: [
+          '删除每日日志（daily_logs）。',
+          '该操作是破坏性的，会要求用户确认。',
+        ].join('\n'),
+        inputSchema: dailyLogDeleteToolSchema,
+        needsApproval: true,
+        execute: async (args) => {
+          const summaryText = toSummaryText(args.summary_text, '删除每日日志');
+          const date = args.log_date ?? '';
+          return applyOrDraftWriteback({ daily_log_delete_date: date }, summaryText);
         },
       });
 
@@ -1025,7 +1259,33 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: await convertToModelMessages(trimmedConversation as any),
         tools: allowProfileSync
-          ? { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool, sync_profile: syncProfileTool }
+          ? {
+            query_user_data: queryUserDataTool,
+            delegate_generate: delegateGenerateTool,
+            user_patch: userPatchTool,
+            profile_patch: profilePatchTool,
+            conditions_upsert: conditionsUpsertTool,
+            conditions_replace_all: conditionsReplaceAllTool,
+            conditions_delete: conditionsDeleteTool,
+            conditions_clear_all: conditionsClearAllTool,
+            training_goals_upsert: trainingGoalsUpsertTool,
+            training_goals_replace_all: trainingGoalsReplaceAllTool,
+            training_goals_delete: trainingGoalsDeleteTool,
+            training_goals_clear_all: trainingGoalsClearAllTool,
+            health_metrics_create: healthMetricsCreateTool,
+            health_metrics_update: healthMetricsUpdateTool,
+            health_metrics_delete: healthMetricsDeleteTool,
+            training_plan_set: trainingPlanSetTool,
+            training_plan_delete: trainingPlanDeleteTool,
+            nutrition_plan_set: nutritionPlanSetTool,
+            nutrition_plan_delete: nutritionPlanDeleteTool,
+            supplement_plan_set: supplementPlanSetTool,
+            supplement_plan_delete: supplementPlanDeleteTool,
+            diet_records_create: dietRecordsCreateTool,
+            diet_records_delete: dietRecordsDeleteTool,
+            daily_log_upsert: dailyLogUpsertTool,
+            daily_log_delete: dailyLogDeleteTool,
+          }
           : { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool },
         stopWhen: allowProfileSync ? stepCountIs(6) : stepCountIs(4),
         timeout: 60_000,

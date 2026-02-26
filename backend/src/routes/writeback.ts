@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Bindings, Variables } from '../types';
 import { authMiddleware } from '../middleware/auth';
-import { applyAutoWriteback, recordWritebackAudit, sanitizeWritebackPayloadForContext } from '../services/orchestrator';
+import { applyAutoWriteback, recordWritebackAudit } from '../services/orchestrator';
 import { syncProfileToolSchema } from '../agents/sync-profile-tool';
 
 export const writebackRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -49,14 +49,7 @@ writebackRoutes.post('/commit', async (c) => {
 
   const draftId = parsed.data.draft_id;
   const contextText = typeof parsed.data.context_text === 'string' ? parsed.data.context_text : '';
-  const payloadRaw = parsed.data.payload ?? {};
-  const { payload, dropped } = sanitizeWritebackPayloadForContext(
-    payloadRaw as unknown as Record<string, unknown>,
-    contextText
-  );
-  if (dropped.length > 0) {
-    console.warn('[writeback/commit] payload sanitized:', { dropped, userId });
-  }
+  const payload = (parsed.data.payload ?? {}) as unknown as Record<string, unknown>;
   if (Object.keys(payload).length === 0) {
     return c.json({ success: false, error: '本次同步请求未包含明确可写回的目标模块，请在对话中明确说明要修改哪些信息。' }, 400);
   }

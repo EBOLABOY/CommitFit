@@ -88,6 +88,35 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+const WRITEBACK_TOOL_NAMES = new Set<string>([
+  // Backward compatibility (older backend versions)
+  'sync_profile',
+  // Current backend (split writeback tools)
+  'user_patch',
+  'profile_patch',
+  'conditions_upsert',
+  'conditions_replace_all',
+  'conditions_delete',
+  'conditions_clear_all',
+  'training_goals_upsert',
+  'training_goals_replace_all',
+  'training_goals_delete',
+  'training_goals_clear_all',
+  'health_metrics_create',
+  'health_metrics_update',
+  'health_metrics_delete',
+  'training_plan_set',
+  'training_plan_delete',
+  'nutrition_plan_set',
+  'nutrition_plan_delete',
+  'supplement_plan_set',
+  'supplement_plan_delete',
+  'diet_records_create',
+  'diet_records_delete',
+  'daily_log_upsert',
+  'daily_log_delete',
+]);
+
 function extractErrorText(value: unknown): string {
   if (!value || typeof value !== 'object') return '服务端返回错误';
   const obj = value as Record<string, unknown>;
@@ -164,7 +193,7 @@ export function useAgentChat(sessionId = 'default') {
   const [writebackSummary, setWritebackSummary] = useState<OrchestrateAutoWriteSummary | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingToolApproval | null>(null);
 
-  // Local-First：sync_profile 工具不直接写远端，而是产出草稿写入 Outbox，再通过 HTTP commit 幂等提交
+  // Local-First：写回工具不直接写远端，而是产出草稿写入 Outbox，再通过 HTTP commit 幂等提交
   const enqueueWritebackDraft = useWritebackOutboxStore((s) => s.enqueueDraft);
   const commitWritebackDraft = useWritebackOutboxStore((s) => s.commitDraft);
 
@@ -575,12 +604,12 @@ export function useAgentChat(sessionId = 'default') {
           }
         }
 
-        if (toolName === 'sync_profile') {
+        if (WRITEBACK_TOOL_NAMES.has(toolName)) {
           if (preliminary) break;
           if (isPlainObject(output)) {
             // Local-First output: { success, draft_id, payload, context_text, summary_text }
             if (output.success === false) {
-              setError(typeof output.error === 'string' ? output.error : '档案同步草稿生成失败');
+              setError(typeof output.error === 'string' ? output.error : '写回草稿生成失败');
             } else if (typeof output.draft_id === 'string' && output.draft_id.trim()) {
               const draftId = output.draft_id.trim();
               const summaryText =
