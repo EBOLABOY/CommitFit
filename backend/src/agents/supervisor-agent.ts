@@ -341,27 +341,51 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         // keep chat flow resilient even if audit write fails
       }
 
-      // 直写兜底：对于“清空/删除全部”这类明确、可验证、强确定性的操作，优先保证数据正确落库，
-      // 避免模型仅口头答复却不调用工具导致“看起来删除了但实际上没删”的矛盾。
-      if (allowProfileSync) {
-        const target = detectDirectClearWritebackTarget(userText);
-        if (target) {
+      // 直写兜底：对于“清空/删除全部”这类明确、可验证、强确定性的操作，直接落库并短路返回，
+      // 避免 LLM 口头承诺却未调用工具，或 LLM 调用失败导致用户一直 loading。
+      const directClearTarget = detectDirectClearWritebackTarget(userText);
+      if (directClearTarget) {
+        if (!allowProfileSync) {
+          return textResponse('当前会话未启用档案同步（allow_profile_sync=false），无法执行清空操作。');
+        }
+
+        const label = directClearTarget === 'conditions' ? '伤病记录' : '训练目标';
+        this.broadcastCustom({ type: 'status', message: `正在清空${label}...` });
+
+        try {
+          const payload = directClearTarget === 'conditions'
+            ? { conditions_mode: 'clear_all' as const }
+            : { training_goals_mode: 'clear_all' as const };
+          const summary = await applyAutoWriteback(this.env.DB, userId, payload, { contextText: userText });
+          const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
+          this.broadcastCustom(syncBroadcast);
+
           try {
-            const payload = target === 'conditions'
-              ? { conditions_mode: 'clear_all' as const }
-              : { training_goals_mode: 'clear_all' as const };
-            const summary = await applyAutoWriteback(this.env.DB, userId, payload, { contextText: userText });
-            const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
-            this.broadcastCustom(syncBroadcast);
-            try {
-              await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
-            } catch { /* ignore */ }
-          } catch (error) {
-            const errMsg = error instanceof Error ? error.message : '清空写回失败';
-            try {
-              await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
-            } catch { /* ignore */ }
-          }
+            await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
+          } catch { /* ignore */ }
+
+          const deletedCount = directClearTarget === 'conditions'
+            ? (summary.conditions_deleted || 0)
+            : (summary.training_goals_deleted || 0);
+          const assistantText = deletedCount > 0
+            ? `已按你的要求清空${label}（共删除 ${deletedCount} 条）。`
+            : `你的${label}本来就是空的，无需清空。`;
+
+          try {
+            await saveOrchestrateAssistantMessage(this.env.DB, userId, assistantText, {
+              architecture: 'direct_clear_writeback',
+              target: directClearTarget,
+              deleted_count: deletedCount,
+            });
+          } catch { /* ignore */ }
+
+          return textResponse(assistantText);
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : '清空写回失败';
+          try {
+            await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
+          } catch { /* ignore */ }
+          return textResponse(`[错误] ${errMsg}`);
         }
       }
 
