@@ -15,7 +15,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import Markdown from 'react-native-markdown-display';
+import Markdown, { renderRules } from 'react-native-markdown-display';
 import * as ImagePicker from 'expo-image-picker';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Toast from 'react-native-toast-message';
@@ -173,6 +173,48 @@ export default function AIChatScreen() {
     th: { padding: 6, borderWidth: 0.5, borderColor: Colors.border, fontWeight: '600' as const },
     td: { padding: 6, borderWidth: 0.5, borderColor: Colors.border },
   }), [Colors]);
+
+  // 允许长按选中文本（拖拽选择 + 系统复制）
+  const selectableMarkdownRules = useMemo(() => ({
+    ...renderRules,
+    text: (node: any, children: any, parent: any, styles: any, inheritedStyles: any = {}) => (
+      <Text selectable key={node.key} style={[inheritedStyles, styles.text]}>
+        {node.content}
+      </Text>
+    ),
+    textgroup: (node: any, children: any, parent: any, styles: any) => (
+      <Text selectable key={node.key} style={styles.textgroup}>
+        {children}
+      </Text>
+    ),
+    code_inline: (node: any, children: any, parent: any, styles: any, inheritedStyles: any = {}) => (
+      <Text selectable key={node.key} style={[inheritedStyles, styles.code_inline]}>
+        {node.content}
+      </Text>
+    ),
+    code_block: (node: any, children: any, parent: any, styles: any, inheritedStyles: any = {}) => {
+      let content = node.content;
+      if (typeof content === 'string' && content.charAt(content.length - 1) === '\n') {
+        content = content.substring(0, content.length - 1);
+      }
+      return (
+        <Text selectable key={node.key} style={[inheritedStyles, styles.code_block]}>
+          {content}
+        </Text>
+      );
+    },
+    fence: (node: any, children: any, parent: any, styles: any, inheritedStyles: any = {}) => {
+      let content = node.content;
+      if (typeof content === 'string' && content.charAt(content.length - 1) === '\n') {
+        content = content.substring(0, content.length - 1);
+      }
+      return (
+        <Text selectable key={node.key} style={[inheritedStyles, styles.fence]}>
+          {content}
+        </Text>
+      );
+    },
+  }), []);
 
   const getImageSource = useCallback((image: string) => {
     if (image.startsWith('file:') || image.startsWith('content:') || image.startsWith('data:')) return { uri: image };
@@ -360,19 +402,19 @@ export default function AIChatScreen() {
              contentContainerStyle={styles.messageList}
              renderItem={({ item }) => (
                <Animated.View entering={FadeIn.duration(260)}>
-                 <Pressable
-                    style={[
-                      styles.messageBubble,
-                      item.role === 'user'
-                        ? [styles.userBubble, { backgroundColor: Colors.primary }]
-                      : [styles.assistantBubble, { backgroundColor: Colors.surface }],
-                  ]}
-                >
-                  {/* Routing chip */}
-                  {item.role === 'assistant' && item.routingInfo && (
-                    <View style={styles.routingChipRow}>
-                      <View style={[styles.routingDot, { backgroundColor: getRoleColor(item.routingInfo.primary_role) }]} />
-                      <Text style={[styles.routingChipText, { color: Colors.textSecondary }]}>
+                 <View
+                   style={[
+                     styles.messageBubble,
+                     item.role === 'user'
+                       ? [styles.userBubble, { backgroundColor: Colors.primary }]
+                       : [styles.assistantBubble, { backgroundColor: Colors.surface }],
+                   ]}
+                 >
+                   {/* Routing chip */}
+                   {item.role === 'assistant' && item.routingInfo && (
+                     <View style={styles.routingChipRow}>
+                       <View style={[styles.routingDot, { backgroundColor: getRoleColor(item.routingInfo.primary_role) }]} />
+                       <Text style={[styles.routingChipText, { color: Colors.textSecondary }]}>
                         {item.routingInfo.primary_role_name}
                         {item.routingInfo.collaborators.length > 0
                           ? ` + ${item.routingInfo.collaborators.map((col: { role: AIRole; role_name: string }) => col.role_name).join('、')}`
@@ -392,21 +434,21 @@ export default function AIChatScreen() {
                       </Text>
                     </View>
                   )}
-                  {item.image && (
-                    <TouchableOpacity activeOpacity={0.85} onPress={() => setPreviewImage(item.image!)}>
-                      <Image source={getImageSource(item.image)} style={styles.messageImage} resizeMode="cover" />
-                    </TouchableOpacity>
-                  )}
-                  {item.role === 'user' ? (
-                    <Text style={[styles.messageText, styles.userText]}>{item.content}</Text>
-                  ) : item.content ? (
-                    <View>
-                      <Markdown style={mdStyles}>{item.content}</Markdown>
-                      {item.isStreaming && !!streamStatus && (
-                        <Text style={[styles.statusText, { color: Colors.textSecondary }]}>
-                          {streamStatus}
-                        </Text>
-                      )}
+                   {item.image && (
+                     <TouchableOpacity activeOpacity={0.85} onPress={() => setPreviewImage(item.image!)}>
+                       <Image source={getImageSource(item.image)} style={styles.messageImage} resizeMode="cover" />
+                     </TouchableOpacity>
+                   )}
+                   {item.role === 'user' ? (
+                     <Text selectable style={[styles.messageText, styles.userText]}>{item.content}</Text>
+                   ) : item.content ? (
+                     <View>
+                       <Markdown style={mdStyles} rules={selectableMarkdownRules}>{item.content}</Markdown>
+                       {item.isStreaming && !!streamStatus && (
+                         <Text style={[styles.statusText, { color: Colors.textSecondary }]}>
+                           {streamStatus}
+                         </Text>
+                       )}
                     </View>
                   ) : item.isStreaming ? (
                     <View style={styles.typingRow}>
@@ -417,40 +459,40 @@ export default function AIChatScreen() {
                         <Text style={[styles.statusText, { color: Colors.textSecondary }]}>{streamStatus}</Text>
                       )}
                     </View>
-                  ) : null}
-                </Pressable>
-                {/* Supplement cards */}
-                {item.role === 'assistant' && !item.isStreaming && item.supplements && item.supplements.length > 0 && (
-                  <View style={styles.supplementsContainer}>
-                    {item.supplements.map((sup: SSESupplementEvent, supIdx: number) => (
-                      <View
-                        key={`${item.id}-sup-${supIdx}`}
-                        style={[styles.supplementCard, { backgroundColor: Colors.surface, borderLeftColor: getRoleColor(sup.role) }]}
-                      >
-                        <Text style={[styles.supplementTitle, { color: getRoleColor(sup.role) }]}>
-                          {sup.role_name} 补充
-                        </Text>
-                        <Markdown style={mdStyles}>{sup.content}</Markdown>
-                      </View>
-                    ))}
-                  </View>
-                )}
-                {/* Live supplement cards during streaming */}
-                {item.role === 'assistant' && item.isStreaming && supplements.length > 0 && (
-                  <View style={styles.supplementsContainer}>
-                    {supplements.map((sup: SSESupplementEvent, supIdx: number) => (
-                      <View
-                        key={`live-sup-${supIdx}`}
-                        style={[styles.supplementCard, { backgroundColor: Colors.surface, borderLeftColor: getRoleColor(sup.role) }]}
-                      >
-                        <Text style={[styles.supplementTitle, { color: getRoleColor(sup.role) }]}>
-                          {sup.role_name} 补充
-                        </Text>
-                        <Markdown style={mdStyles}>{sup.content}</Markdown>
-                      </View>
-                    ))}
-                  </View>
-                )}
+                   ) : null}
+                 </View>
+                 {/* Supplement cards */}
+                 {item.role === 'assistant' && !item.isStreaming && item.supplements && item.supplements.length > 0 && (
+                   <View style={styles.supplementsContainer}>
+                     {item.supplements.map((sup: SSESupplementEvent, supIdx: number) => (
+                       <View
+                         key={`${item.id}-sup-${supIdx}`}
+                         style={[styles.supplementCard, { backgroundColor: Colors.surface, borderLeftColor: getRoleColor(sup.role) }]}
+                       >
+                         <Text style={[styles.supplementTitle, { color: getRoleColor(sup.role) }]}>
+                           {sup.role_name} 补充
+                         </Text>
+                         <Markdown style={mdStyles} rules={selectableMarkdownRules}>{sup.content}</Markdown>
+                       </View>
+                     ))}
+                   </View>
+                 )}
+                 {/* Live supplement cards during streaming */}
+                 {item.role === 'assistant' && item.isStreaming && supplements.length > 0 && (
+                   <View style={styles.supplementsContainer}>
+                     {supplements.map((sup: SSESupplementEvent, supIdx: number) => (
+                       <View
+                         key={`live-sup-${supIdx}`}
+                         style={[styles.supplementCard, { backgroundColor: Colors.surface, borderLeftColor: getRoleColor(sup.role) }]}
+                       >
+                         <Text style={[styles.supplementTitle, { color: getRoleColor(sup.role) }]}>
+                           {sup.role_name} 补充
+                         </Text>
+                         <Markdown style={mdStyles} rules={selectableMarkdownRules}>{sup.content}</Markdown>
+                       </View>
+                     ))}
+                   </View>
+                 )}
               </Animated.View>
             )}
           />
