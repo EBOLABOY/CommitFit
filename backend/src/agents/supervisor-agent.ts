@@ -116,19 +116,24 @@ function resolveActiveRole(value: string | undefined): AIRole {
   return 'trainer';
 }
 
-function shouldForceSyncProfileTool(userText: string): boolean {
+function detectDirectClearWritebackTarget(userText: string): 'conditions' | 'training_goals' | null {
   const t = userText.trim();
-  if (!t) return false;
-  // 禁止账号/密码类意图触发写回工具（这些不允许用 sync_profile 操作）
-  if (/(账号|账户|密码|口令|邮箱|email|注销|删除账号|删除账户)/i.test(t)) return false;
+  if (!t) return null;
+  // 账号/密码类操作永远不在此处做直写
+  if (/(账号|账户|密码|口令|邮箱|email|注销|删除账号|删除账户)/i.test(t)) return null;
 
-  // 仅对“明确的删除/清空/重置”类写回做强制工具调用，避免误伤普通咨询。
   const hasVerb = /(清空|清除|删除|移除|重置|清理)/.test(t);
-  if (!hasVerb) return false;
+  if (!hasVerb) return null;
 
-  // 必须包含可落库的目标对象词，否则让模型先问清楚再写回。
-  const hasTarget = /(伤病|伤病记录|训练目标|目标|理化指标|指标|饮食记录|饮食|训练计划|计划|日志|体重|睡眠|档案|身体|昵称|头像)/.test(t);
-  return hasTarget;
+  // 负向语气：例如“不要清空伤病记录”
+  if (/(不要|别|不想|不用|先别)/.test(t)) return null;
+
+  // 纯提问（“怎么清空/如何删除”）不直写，让模型先解释或追问确认
+  if (/(怎么|如何)/.test(t) && !/(帮我|请|麻烦)/.test(t)) return null;
+
+  if (/(伤病记录|伤病)/.test(t)) return 'conditions';
+  if (/(训练目标|目标)/.test(t)) return 'training_goals';
+  return null;
 }
 
 function extractImageUrl(msg: AgentMessageLike | undefined): string | null {
@@ -334,6 +339,30 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         await saveOrchestrateUserMessage(this.env.DB, userId, userText, userImageUrl);
       } catch {
         // keep chat flow resilient even if audit write fails
+      }
+
+      // 直写兜底：对于“清空/删除全部”这类明确、可验证、强确定性的操作，优先保证数据正确落库，
+      // 避免模型仅口头答复却不调用工具导致“看起来删除了但实际上没删”的矛盾。
+      if (allowProfileSync) {
+        const target = detectDirectClearWritebackTarget(userText);
+        if (target) {
+          try {
+            const payload = target === 'conditions'
+              ? { conditions_mode: 'clear_all' as const }
+              : { training_goals_mode: 'clear_all' as const };
+            const summary = await applyAutoWriteback(this.env.DB, userId, payload, { contextText: userText });
+            const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
+            this.broadcastCustom(syncBroadcast);
+            try {
+              await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
+            } catch { /* ignore */ }
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : '清空写回失败';
+            try {
+              await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', null, errMsg, userText);
+            } catch { /* ignore */ }
+          }
+        }
       }
 
       // 2. Build history for routing (last 16 messages as simple text)
@@ -952,9 +981,6 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         system: systemPrompt,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: await convertToModelMessages(trimmedConversation as any),
-        toolChoice: (allowProfileSync && shouldForceSyncProfileTool(userText))
-          ? { type: 'tool', toolName: 'sync_profile' }
-          : 'auto',
         tools: allowProfileSync
           ? { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool, sync_profile: syncProfileTool }
           : { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool },
