@@ -16,7 +16,6 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Markdown from 'react-native-markdown-display';
-import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Toast from 'react-native-toast-message';
@@ -175,8 +174,6 @@ export default function AIChatScreen() {
     td: { padding: 6, borderWidth: 0.5, borderColor: Colors.border },
   }), [Colors]);
 
-  const isErrorMessage = (content?: string) => !!content && content.startsWith('[错误]');
-
   const getImageSource = useCallback((image: string) => {
     if (image.startsWith('file:') || image.startsWith('content:') || image.startsWith('data:')) return { uri: image };
     const uri = `${API_BASE_URL}/api/images/${image}`;
@@ -231,38 +228,6 @@ export default function AIChatScreen() {
     ]);
   };
 
-  const handleCopyMessage = async (content: string) => {
-    if (!content || isErrorMessage(content)) return;
-    await Clipboard.setStringAsync(content);
-    Toast.show({ type: 'success', text1: '已复制到剪贴板' });
-  };
-
-  const normalizeAdviceLine = (line: string) =>
-    line
-      .replace(/^#{1,6}\s+/, '')
-      .replace(/^[-*•]\s+/, '')
-      .replace(/^\d+[.)、]\s+/, '')
-      .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-  const handleCopyStructuredAdvice = async (content: string) => {
-    if (!content || isErrorMessage(content)) return;
-    const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const bullets = lines
-      .filter((l) => /^[-*•]\s+/.test(l) || /^\d+[.)、]\s+/.test(l) || /^#{1,6}\s+/.test(l))
-      .map(normalizeAdviceLine);
-    const unique = [...new Set(bullets.map((b) => b.toLowerCase()))].map(
-      (key) => bullets.find((b) => b.toLowerCase() === key)!
-    ).slice(0, 8);
-    const text = unique.length > 0
-      ? unique.map((l, i) => `${i + 1}. ${l}`).join('\n')
-      : normalizeAdviceLine(content);
-    await Clipboard.setStringAsync(text);
-    Toast.show({ type: 'success', text1: '结构化建议已复制' });
-  };
 
   const handleSend = useCallback(async (presetText?: string) => {
     const text = (presetText ?? input).trim() || (pendingImage ? '请帮我分析这张图片' : '');
@@ -392,15 +357,14 @@ export default function AIChatScreen() {
             data={messages}
             extraData={streamStatus}
             keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.messageList}
-            renderItem={({ item }) => (
-              <Animated.View entering={FadeIn.duration(260)}>
-                <Pressable
-                  onLongPress={() => handleCopyMessage(item.content)}
-                  style={[
-                    styles.messageBubble,
-                    item.role === 'user'
-                      ? [styles.userBubble, { backgroundColor: Colors.primary }]
+             contentContainerStyle={styles.messageList}
+             renderItem={({ item }) => (
+               <Animated.View entering={FadeIn.duration(260)}>
+                 <Pressable
+                    style={[
+                      styles.messageBubble,
+                      item.role === 'user'
+                        ? [styles.userBubble, { backgroundColor: Colors.primary }]
                       : [styles.assistantBubble, { backgroundColor: Colors.surface }],
                   ]}
                 >
@@ -454,15 +418,6 @@ export default function AIChatScreen() {
                       )}
                     </View>
                   ) : null}
-                  {item.role === 'assistant' && !!item.content && !item.isStreaming && !isErrorMessage(item.content) && (
-                    <TouchableOpacity
-                      style={[styles.copyButton, { borderColor: Colors.primary + '45' }]}
-                      onPress={() => handleCopyStructuredAdvice(item.content)}
-                    >
-                      <Ionicons name="copy-outline" size={14} color={Colors.primary} />
-                      <Text style={[styles.copyButtonText, { color: Colors.primary }]}>复制建议</Text>
-                    </TouchableOpacity>
-                  )}
                 </Pressable>
                 {/* Supplement cards */}
                 {item.role === 'assistant' && !item.isStreaming && item.supplements && item.supplements.length > 0 && (
@@ -717,18 +672,6 @@ const styles = StyleSheet.create({
   },
   supplementTitle: { fontSize: FontSize.sm, fontWeight: '700', marginBottom: Spacing.xs },
 
-  copyButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.xs,
-    alignSelf: 'flex-start',
-    marginTop: Spacing.sm,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.xs,
-    borderRadius: Radius.full,
-    borderWidth: 1,
-  },
-  copyButtonText: { fontSize: FontSize.xs, fontWeight: '500' },
 
   // Error banner
   errorBanner: {
