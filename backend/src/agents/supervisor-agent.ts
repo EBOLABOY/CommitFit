@@ -1289,6 +1289,35 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           : { query_user_data: queryUserDataTool, delegate_generate: delegateGenerateTool },
         stopWhen: allowProfileSync ? stepCountIs(6) : stepCountIs(4),
         timeout: 60_000,
+        onError: async ({ error }) => {
+          const toErr = (e: unknown): string => {
+            if (e instanceof Error && e.message) return e.message;
+            if (typeof e === 'string') return e;
+            try { return JSON.stringify(e); } catch { return String(e); }
+          };
+          const errText = toErr(error);
+          const reqId = errText.match(/request\\s*id\\s*[:=]\\s*([\\w-]+)/i)?.[1] || null;
+
+          console.error('[SupervisorAgent] streamText error:', { userId, reqId, error: errText });
+          try {
+            const key = `log:ws-stream-error:${Date.now()}:${crypto.randomUUID()}`;
+            await this.env.KV.put(key, JSON.stringify({
+              at: new Date().toISOString(),
+              userId,
+              reqId,
+              error: errText,
+              message_excerpt: userText.length > 300 ? userText.slice(0, 300) : userText,
+              hasImage: hasImageInput,
+            }), { expirationTtl: 60 * 60 * 24 * 7 });
+          } catch {
+            // ignore logging failure
+          }
+          try {
+            this.broadcastCustom({ type: 'status', message: '失败，请重试' });
+          } catch {
+            // ignore broadcast failure
+          }
+        },
         onFinish: async (event) => {
           const text = event.text;
 

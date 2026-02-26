@@ -127,6 +127,30 @@ function extractErrorText(value: unknown): string {
   return '服务端返回错误';
 }
 
+function normalizeStreamErrorText(raw: string): string {
+  const text = (raw || '').trim();
+  if (!text) return '请求失败，请重试';
+
+  const lower = text.toLowerCase();
+
+  // Provider-level channel exhaustion (upstream load balancer)
+  if (lower.includes('no available channel')) return '服务繁忙，请稍后重试';
+
+  // Retry wrapper error from AI SDK, keep only root cause if possible
+  if (lower.startsWith('failed after') && lower.includes('last error:')) {
+    const m = text.match(/last\\s+error:\\s*(.+)$/i);
+    if (m?.[1]) return normalizeStreamErrorText(m[1]);
+    return '服务暂时不可用，请稍后重试';
+  }
+
+  if (lower.includes('timeout') || lower.includes('timed out')) return '请求超时，请重试';
+  if (lower.includes('tool result is missing')) return '会话恢复失败，请重试';
+
+  // Keep it short for UI banner.
+  if (text.length > 180) return `${text.slice(0, 180)}...`;
+  return text;
+}
+
 function parseStreamChunkBody(body: unknown): Record<string, unknown> | null {
   if (body && typeof body === 'object' && !Array.isArray(body)) {
     return body as Record<string, unknown>;
@@ -208,6 +232,7 @@ export function useAgentChat(sessionId = 'default') {
   const currentAssistantIdRef = useRef<string | null>(null);
   const routingInfoRef = useRef<SSERoutingEvent | null>(null);
   const supplementsRef = useRef<SSESupplementEvent[]>([]);
+  const lastWritebackCommitAtRef = useRef<number>(0);
 
   useEffect(() => {
     pendingApprovalRef.current = pendingApproval;
@@ -452,6 +477,8 @@ export function useAgentChat(sessionId = 'default') {
     }
 
     if (msgType === 'profile_sync_result') {
+      lastWritebackCommitAtRef.current = Date.now();
+      setError(null);
       setWritebackSummary(parsed.summary as OrchestrateAutoWriteSummary);
       return;
     }
@@ -628,10 +655,16 @@ export function useAgentChat(sessionId = 'default') {
               });
 
               void commitWritebackDraft(draftId).then((summary) => {
-                if (summary) setWritebackSummary(summary);
+                if (summary) {
+                  lastWritebackCommitAtRef.current = Date.now();
+                  setError(null);
+                  setWritebackSummary(summary);
+                }
               });
             } else if (isPlainObject(output.changes)) {
               // remote writeback mode: tool 返回 changes
+              lastWritebackCommitAtRef.current = Date.now();
+              setError(null);
               setWritebackSummary(output.changes as unknown as OrchestrateAutoWriteSummary);
             }
           }
@@ -651,12 +684,20 @@ export function useAgentChat(sessionId = 'default') {
       case 'error': {
         // Stream error
         setIsLoading(false);
-        const errorText =
+        finalizeCurrentAssistant();
+        const rawErrorText =
           (chunk.errorText as string) ||
           (chunk.error as string) ||
           (chunk.message as string) ||
           '流式响应错误';
-        setError(errorText);
+        const errorText = normalizeStreamErrorText(rawErrorText);
+        const now = Date.now();
+        // 若刚完成写回提交（Local-First commit 成功），则忽略上游生成失败的噪声错误。
+        if (now - lastWritebackCommitAtRef.current < 5000) {
+          setError(null);
+        } else {
+          setError(errorText);
+        }
         break;
       }
       case 'finish':
