@@ -432,7 +432,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               return { success: true, data: profile };
             }
             case 'conditions': {
-              const status = args.status && args.status !== 'all' ? args.status : null;
+              const status = args.status === 'active' || args.status === 'recovered' ? args.status : null;
               const sql = status
                 ? "SELECT * FROM conditions WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?"
                 : 'SELECT * FROM conditions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?';
@@ -442,7 +442,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               return { success: true, data: res.results || [] };
             }
             case 'training_goals': {
-              const status = args.status && args.status !== 'all' ? args.status : null;
+              const status = args.status === 'active' || args.status === 'completed' ? args.status : null;
               const sql = status
                 ? "SELECT * FROM training_goals WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?"
                 : 'SELECT * FROM training_goals WHERE user_id = ? ORDER BY created_at DESC LIMIT ?';
