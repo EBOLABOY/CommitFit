@@ -18,6 +18,7 @@ WRITEBACK_MODE = "local_first"
 AGENT_FLOW_MODE = "governed"
 AGENT_APPROVAL_FALLBACK = "auto_approve"
 AGENT_EXECUTION_PROFILE_DEFAULT = "build"
+AGENT_DEBUG_ENABLED = "false"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # JWT_SECRET

@@ -16,6 +16,7 @@ export type Bindings = {
   AGENT_FLOW_MODE?: string; // dual / governed
   AGENT_APPROVAL_FALLBACK?: string; // auto_approve / reject
   AGENT_EXECUTION_PROFILE_DEFAULT?: string; // build / plan
+  AGENT_DEBUG_ENABLED?: string; // true / false
 };
 
 export type Variables = {

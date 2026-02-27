@@ -21,7 +21,6 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Toast from 'react-native-toast-message';
 import * as Haptics from 'expo-haptics';
 import Animated, {
-  FadeIn,
   useSharedValue,
   useAnimatedStyle,
   withRepeat,
@@ -451,7 +450,7 @@ export default function AIChatScreen() {
                  return null;
                }
                return (
-                 <Animated.View entering={FadeIn.duration(260)}>
+                 <View>
                    <View
                      style={[
                        styles.messageBubble,
@@ -543,7 +542,7 @@ export default function AIChatScreen() {
                      ))}
                    </View>
                  )}
-                 </Animated.View>
+                  </View>
                 );
               }}
           />

@@ -89,19 +89,31 @@ export default function AISettingsScreen() {
         custom_primary_model: primaryModel,
         custom_fallback_model: fallbackModel,
       });
+      setProvider(provider);
+
+      let keySaveError: string | null = null;
 
       if (provider === 'custom' && apiKey.trim()) {
         if (!user?.id) {
-          Toast.show({ type: 'error', text1: '保存失败', text2: '用户未登录，无法保存密钥' });
-          return;
+          keySaveError = '用户未登录，无法保存密钥';
+        } else {
+          try {
+            await setCustomAIKey(user.id, apiKey.trim());
+            setCustomApiKeyConfigured(true);
+            setApiKey('');
+          } catch {
+            keySaveError = 'API Key 保存失败，请稍后重试';
+          }
         }
-        await setCustomAIKey(user.id, apiKey.trim());
-        setCustomApiKeyConfigured(true);
-        setApiKey('');
       }
 
-      setProvider(provider);
-      Toast.show({ type: 'success', text1: '已保存', text2: 'AI 配置已更新' });
+      if (keySaveError) {
+        Toast.show({ type: 'error', text1: '配置已保存', text2: keySaveError });
+      } else if (provider === 'custom' && !apiKey.trim()) {
+        Toast.show({ type: 'success', text1: '已保存', text2: '基础配置已更新（API Key 未变更）' });
+      } else {
+        Toast.show({ type: 'success', text1: '已保存', text2: 'AI 配置已更新' });
+      }
     } catch {
       Toast.show({ type: 'error', text1: '保存失败', text2: '请稍后重试' });
     } finally {
