@@ -16,6 +16,7 @@
     "hono": "^4.6.0",
     "hono-agents": "^3.0.5",
     "jose": "^5.9.0",
+    "workers-ai-provider": "^3.1.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {

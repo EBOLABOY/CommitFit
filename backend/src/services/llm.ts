@@ -1,4 +1,6 @@
 import type { Bindings } from '../types';
+import { generateText, type ModelMessage } from 'ai';
+import { getLLMProviderKind, getMainLLMModel } from './ai-provider';
 
 type ContentPart =
   | { type: 'text'; text: string }
@@ -48,6 +50,9 @@ class LLMHTTPError extends Error {
   }
 }
 
+type WorkersTextPart = { type: 'text'; text: string };
+type WorkersImagePart = { type: 'image'; image: URL };
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -62,6 +67,128 @@ function isRetryableHttpStatus(status: number): boolean {
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+}
+
+function getErrorStatusCode(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  if (typeof statusCode === 'number') return statusCode;
+  const status = (error as { status?: unknown }).status;
+  if (typeof status === 'number') return status;
+  return undefined;
+}
+
+function normalizeWorkersErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function toWorkersModelMessages(messages: LLMMessage[]): ModelMessage[] {
+  const converted: ModelMessage[] = [];
+
+  for (const message of messages) {
+    if (typeof message.content === 'string') {
+      converted.push({
+        role: message.role,
+        content: message.content,
+      });
+      continue;
+    }
+
+    if (message.role !== 'user') {
+      const text = message.content
+        .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n');
+      converted.push({
+        role: message.role,
+        content: text,
+      });
+      continue;
+    }
+
+    const parts: Array<WorkersTextPart | WorkersImagePart> = [];
+    for (const part of message.content) {
+      if (part.type === 'text') {
+        parts.push({ type: 'text', text: part.text });
+        continue;
+      }
+
+      if (part.type === 'image_url') {
+        const raw = part.image_url?.url;
+        if (!raw || typeof raw !== 'string') continue;
+        try {
+          parts.push({ type: 'image', image: new URL(raw) });
+        } catch {
+          // Skip malformed image URLs to keep request resilient.
+        }
+      }
+    }
+
+    converted.push({
+      role: 'user',
+      content: parts.length > 0 ? parts : '',
+    });
+  }
+
+  return converted;
+}
+
+async function callWorkersAINonStream(
+  options: Required<Pick<LLMCallOptions, 'env' | 'messages' | 'timeoutMs'>> & { maxAttempts?: number }
+): Promise<string> {
+  const boundedAttempts = Number.isInteger(options.maxAttempts) && (options.maxAttempts ?? 0) > 0
+    ? Math.min(options.maxAttempts as number, RETRY_DELAYS_MS.length + 1)
+    : RETRY_DELAYS_MS.length + 1;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < boundedAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort('timeout'), options.timeoutMs);
+    try {
+      const { text } = await generateText({
+        model: getMainLLMModel(options.env),
+        messages: toWorkersModelMessages(options.messages),
+        abortSignal: controller.signal,
+      });
+      return text || '';
+    } catch (error) {
+      lastError = error;
+      if (error instanceof Error && error.name === 'AbortError') {
+        if (attempt < boundedAttempts - 1) {
+          const delay = RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
+          await sleep(delay);
+          continue;
+        }
+        throw new RetryableLLMError('LLM 请求超时，请稍后重试（Workers AI）', 408, options.env.LLM_MODEL);
+      }
+
+      const statusCode = getErrorStatusCode(error);
+      if (typeof statusCode === 'number' && isRetryableHttpStatus(statusCode)) {
+        if (attempt < boundedAttempts - 1) {
+          const delay = RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
+          await sleep(delay);
+          continue;
+        }
+        throw new RetryableLLMError(
+          `LLM 服务暂时不可用(${statusCode})，请稍后重试（模型: ${options.env.LLM_MODEL}）`,
+          statusCode,
+          options.env.LLM_MODEL
+        );
+      }
+
+      throw new Error(`Workers AI 调用失败: ${normalizeWorkersErrorMessage(error)}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Workers AI 调用失败');
 }
 
 function resolveModelCandidates(env: Bindings): string[] {
@@ -150,6 +277,29 @@ export async function callLLM({
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxAttempts,
 }: LLMCallOptions): Promise<Response> {
+  if (getLLMProviderKind(env) === 'workers_ai') {
+    if (stream) {
+      throw new Error('Workers AI 模式下不支持 callLLM 的原始流式响应，请改用 AI SDK streamText');
+    }
+
+    const text = await callWorkersAINonStream({
+      env,
+      messages,
+      timeoutMs,
+      maxAttempts,
+    });
+
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: text } }],
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
   const modelCandidates = resolveModelCandidates(env);
   const boundedAttempts = Number.isInteger(maxAttempts) && (maxAttempts ?? 0) > 0
     ? Math.min(maxAttempts as number, RETRY_DELAYS_MS.length + 1)
@@ -228,6 +378,7 @@ export function parseSSEContent(sseText: string): string {
 
 export async function callLLMNonStream(options: LLMCallOptions): Promise<string> {
   const response = await callLLM({ ...options, stream: false });
-  const data = await response.json() as { choices: Array<{ message: { content: string } }> };
-  return data.choices[0]?.message?.content || '';
+  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const content = data.choices?.[0]?.message?.content;
+  return typeof content === 'string' ? content : '';
 }

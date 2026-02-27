@@ -77,6 +77,9 @@ export interface PolicySnapshot {
   effective_allow_profile_sync: boolean;
   writeback_mode: string;
   readonly_enforced: boolean;
+  llm_provider?: string;
+  llm_model?: string;
+  llm_role_model?: string;
   shadow_readonly_would_apply?: boolean;
 }
 
@@ -817,6 +820,9 @@ export function useAgentChat(sessionId = 'default') {
         effective_allow_profile_sync: parsed.effective_allow_profile_sync !== false,
         writeback_mode: typeof parsed.writeback_mode === 'string' ? parsed.writeback_mode : 'remote',
         readonly_enforced: parsed.readonly_enforced === true,
+        llm_provider: typeof parsed.llm_provider === 'string' ? parsed.llm_provider : undefined,
+        llm_model: typeof parsed.llm_model === 'string' ? parsed.llm_model : undefined,
+        llm_role_model: typeof parsed.llm_role_model === 'string' ? parsed.llm_role_model : undefined,
         shadow_readonly_would_apply: parsed.shadow_readonly_would_apply === true,
       };
       setPolicySnapshot(snapshot);

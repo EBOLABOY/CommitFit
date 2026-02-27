@@ -1154,13 +1154,37 @@ export interface AgentRuntimeEventInput {
   payload?: Record<string, unknown> | null;
 }
 
+const RUNTIME_REDACT_KEYS = ['token', 'secret', 'password', 'api_key', 'authorization'];
+
+function sanitizeRuntimePayload(payload: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    const lowerKey = key.toLowerCase();
+    if (RUNTIME_REDACT_KEYS.some((frag) => lowerKey.includes(frag))) {
+      sanitized[key] = '[REDACTED]';
+      continue;
+    }
+    if (typeof value === 'string') {
+      sanitized[key] = value.length > 1000 ? `${value.slice(0, 1000)}...(truncated)` : value;
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  return sanitized;
+}
+
 export async function recordAgentRuntimeEvent(
   db: D1Database,
   input: AgentRuntimeEventInput
 ): Promise<void> {
   const id = crypto.randomUUID();
   const flowMode = (input.flowMode || '').slice(0, 24) || 'governed';
-  const payloadJson = input.payload ? JSON.stringify(input.payload) : null;
+  const sanitizedPayload = sanitizeRuntimePayload(input.payload);
+  const payloadJsonRaw = sanitizedPayload ? JSON.stringify(sanitizedPayload) : null;
+  const payloadJson = payloadJsonRaw && payloadJsonRaw.length > 12000
+    ? `${payloadJsonRaw.slice(0, 12000)}...(truncated)`
+    : payloadJsonRaw;
   await db.prepare(
     'INSERT INTO agent_runtime_events (id, user_id, session_id, request_id, flow_mode, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
   )

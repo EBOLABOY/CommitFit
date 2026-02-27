@@ -9,9 +9,10 @@ routes = [
 ]
 
 [vars]
-LLM_MODEL = "LLM"
-LLM_FALLBACK_MODELS = "LLM1"
-ROLE_LLM_MODEL = "LLM1"
+LLM_PROVIDER = "workers_ai"
+LLM_MODEL = "@cf/zai-org/glm-4.7-flash"
+LLM_FALLBACK_MODELS = "@cf/meta/llama-3.1-8b-instruct"
+ROLE_LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct"
 LLM_BASE_URL = "https://api.izlx.de/v1"
 ALLOWED_ORIGINS = "http://localhost:8081"
 ACTIVE_AI_ROLE = "trainer"
@@ -36,6 +37,9 @@ id = "5fd36595d91e42a5b629fa4a541754ea"
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "lianlema-images"
+
+[ai]
+binding = "AI"
 
 [durable_objects]
 bindings = [

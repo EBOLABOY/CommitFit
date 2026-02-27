@@ -1,10 +1,12 @@
-import type { D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types';
+import type { Ai, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types';
 
 export type Bindings = {
   DB: D1Database;
   KV: KVNamespace;
   R2: R2Bucket;
+  AI?: Ai;
   SupervisorAgent: DurableObjectNamespace;
+  LLM_PROVIDER?: string; // openai_compat / workers_ai
   LLM_MODEL: string;
   LLM_FALLBACK_MODELS?: string;
   ROLE_LLM_MODEL?: string;

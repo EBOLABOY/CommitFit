@@ -4,7 +4,7 @@ import type { Connection, ConnectionContext } from 'agents';
 import { jwtVerify } from 'jose';
 import type { AIRole, AgentExecutionProfile, AgentLifecycleState } from '../../../shared/types';
 import type { Bindings } from '../types';
-import { getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
+import { getLLMRuntimeInfo, getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
 import { queryUserDataToolSchema } from './query-user-data-tool';
 import { delegateGenerateToolSchema } from './delegate-generate-tool';
 import {
@@ -322,6 +322,12 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       : {};
     const runtimePolicy = loadRuntimePolicy(this.env);
     const executionDecision = decideExecutionBehavior(body, runtimePolicy);
+    const llmRuntime = getLLMRuntimeInfo(this.env);
+    const runtimeTelemetryBase = {
+      provider: llmRuntime.provider,
+      primary_model: llmRuntime.primaryModelId,
+      role_model: llmRuntime.roleModelId,
+    };
     const activeRole = resolveActiveRole(this.env.ACTIVE_AI_ROLE);
     const allowProfileSync = executionDecision.effectiveAllowProfileSync;
     const requestId = typeof body.client_trace_id === 'string' && body.client_trace_id.trim()
@@ -356,6 +362,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           flowMode: runtimePolicy.flowMode,
           eventType: 'lifecycle_state',
           payload: {
+            ...runtimeTelemetryBase,
             state,
             detail: detail || null,
           },
@@ -389,6 +396,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         effective_allow_profile_sync: executionDecision.effectiveAllowProfileSync,
         writeback_mode: typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote',
         readonly_enforced: executionDecision.readonlyEnforced,
+        llm_provider: llmRuntime.provider,
+        llm_model: llmRuntime.primaryModelId,
+        llm_role_model: llmRuntime.roleModelId,
         shadow_readonly_would_apply: runtimePolicy.flowMode === 'dual'
           ? executionDecision.shadowReadonlyWouldApply
           : undefined,
@@ -401,7 +411,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           requestId,
           flowMode: runtimePolicy.flowMode,
           eventType: 'policy_snapshot',
-          payload: { ...policySnapshot },
+          payload: { ...runtimeTelemetryBase, ...policySnapshot },
         });
       } catch {
         // ignore telemetry failure
@@ -480,6 +490,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '工具选择：非破坏性更新优先用 *_patch / *_upsert / *_set；删除/清空使用 *_delete / *_clear_all（破坏性操作请谨慎）。',
           executionProfileGuidance,
           writebackModeGuidance,
+          '模块映射：训练目标仅使用 training_goals_*；伤病记录仅使用 conditions_*；理化指标仅使用 health_metrics_*；饮食记录仅使用 diet_records_*。',
           '禁止账号/密码类操作；禁止把客套话写入数据字段。',
           '输出约束：工具执行期间不要反复输出“好的，我现在…”这类阶段性确认语；同义确认语不要重复改写发送。',
           '同一请求只输出一次面向用户的最终结论；中间步骤仅通过工具执行，不要拆分成多条近义回复。',
@@ -502,7 +513,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
       // 6. Stream response via AI SDK
       const model = getMainLLMModel(this.env);
-      const modelAlias = 'LLM';
+      const modelAlias = llmRuntime.primaryModelId;
       this.broadcastCustom({ type: 'status', message: '回答中' });
       await emitLifecycleState('streaming', 'model_stream_started');
 
@@ -755,7 +766,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                   requestId,
                   flowMode: runtimePolicy.flowMode,
                   eventType: 'tool_call',
-                  payload: { tool_name: 'delegate_generate', kind },
+                  payload: { ...runtimeTelemetryBase, tool_name: 'delegate_generate', kind, stage: 'delegate_generate' },
                 });
               } catch {
                 // ignore telemetry failure
@@ -1038,7 +1049,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                   requestId,
                   flowMode: runtimePolicy.flowMode,
                   eventType: 'tool_result',
-                  payload: { tool_name: 'delegate_generate', kind, success: true },
+                  payload: { ...runtimeTelemetryBase, tool_name: 'delegate_generate', kind, success: true, stage: 'delegate_generate' },
                 });
               } catch {
                 // ignore telemetry failure
@@ -1052,7 +1063,14 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                   requestId,
                   flowMode: runtimePolicy.flowMode,
                   eventType: 'tool_result',
-                  payload: { tool_name: 'delegate_generate', kind: args.kind, success: false, error: message },
+                  payload: {
+                    ...runtimeTelemetryBase,
+                    tool_name: 'delegate_generate',
+                    kind: args.kind,
+                    success: false,
+                    error: message,
+                    stage: 'delegate_generate',
+                  },
                 });
               } catch {
                 // ignore telemetry failure
@@ -1071,11 +1089,71 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         return fallback;
       };
 
+      const hasTrainingGoalIntent = (text: string): boolean =>
+        /(训练目标|增肌|减脂|减重|塑形|力量提升|耐力提升|目标)/.test(text);
+
+      const hasConditionIntent = (text: string): boolean =>
+        /(伤病|受伤|疼痛|炎症|康复|拉伤|扭伤|骨折|病史|不适)/.test(text);
+
       const applyOrDraftWriteback = async (
         payload: Record<string, unknown>,
         summaryText: string,
         toolName: string
       ): Promise<Record<string, unknown>> => {
+        const intentText = userText || '';
+        const trainingGoalIntent = hasTrainingGoalIntent(intentText);
+        const conditionIntent = hasConditionIntent(intentText);
+
+        if (toolName.startsWith('conditions_') && trainingGoalIntent && !conditionIntent) {
+          try {
+            await recordAgentRuntimeEvent(this.env.DB, {
+              userId,
+              sessionId,
+              requestId,
+              flowMode: runtimePolicy.flowMode,
+              eventType: 'tool_result',
+              payload: {
+                ...runtimeTelemetryBase,
+                tool_name: toolName,
+                success: false,
+                error: 'intent_guard_mismatch:training_goal_vs_conditions',
+                stage: 'writeback_tool_guard',
+              },
+            });
+          } catch {
+            // ignore telemetry failure
+          }
+          return {
+            success: false,
+            error: '检测到你的意图是“训练目标”而不是“伤病记录”，请改用训练目标工具后重试。',
+          };
+        }
+
+        if (toolName.startsWith('training_goals_') && conditionIntent && !trainingGoalIntent) {
+          try {
+            await recordAgentRuntimeEvent(this.env.DB, {
+              userId,
+              sessionId,
+              requestId,
+              flowMode: runtimePolicy.flowMode,
+              eventType: 'tool_result',
+              payload: {
+                ...runtimeTelemetryBase,
+                tool_name: toolName,
+                success: false,
+                error: 'intent_guard_mismatch:conditions_vs_training_goal',
+                stage: 'writeback_tool_guard',
+              },
+            });
+          } catch {
+            // ignore telemetry failure
+          }
+          return {
+            success: false,
+            error: '检测到你的意图是“伤病记录”而不是“训练目标”，请改用伤病工具后重试。',
+          };
+        }
+
         await emitLifecycleState('tool_running', toolName);
         try {
           await recordAgentRuntimeEvent(this.env.DB, {
@@ -1085,8 +1163,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
             flowMode: runtimePolicy.flowMode,
             eventType: 'tool_call',
             payload: {
+              ...runtimeTelemetryBase,
               tool_name: toolName,
               payload_keys: Object.keys(payload || {}).slice(0, 20),
+              stage: 'writeback_tool',
             },
           });
         } catch {
@@ -1101,7 +1181,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               requestId,
               flowMode: runtimePolicy.flowMode,
               eventType: 'tool_result',
-              payload: { tool_name: toolName, success: false, error: 'empty_payload' },
+              payload: { ...runtimeTelemetryBase, tool_name: toolName, success: false, error: 'empty_payload', stage: 'writeback_tool' },
             });
           } catch {
             // ignore telemetry failure
@@ -1127,7 +1207,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               requestId,
               flowMode: runtimePolicy.flowMode,
               eventType: 'tool_result',
-              payload: { tool_name: toolName, success: true, mode: 'remote' },
+              payload: { ...runtimeTelemetryBase, tool_name: toolName, success: true, mode: 'remote', stage: 'writeback_tool' },
             });
             await recordAgentRuntimeEvent(this.env.DB, {
               userId,
@@ -1135,7 +1215,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               requestId,
               flowMode: runtimePolicy.flowMode,
               eventType: 'writeback_result',
-              payload: { mode: 'remote', tool_name: toolName, success: true },
+              payload: { ...runtimeTelemetryBase, mode: 'remote', tool_name: toolName, success: true, stage: 'writeback_commit' },
             });
           } catch {
             // ignore telemetry failure
@@ -1152,7 +1232,14 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
             requestId,
             flowMode: runtimePolicy.flowMode,
             eventType: 'tool_result',
-            payload: { tool_name: toolName, success: true, mode: 'local_first', draft_id: draftId },
+            payload: {
+              ...runtimeTelemetryBase,
+              tool_name: toolName,
+              success: true,
+              mode: 'local_first',
+              draft_id: draftId,
+              stage: 'writeback_tool',
+            },
           });
           await recordAgentRuntimeEvent(this.env.DB, {
             userId,
@@ -1160,7 +1247,14 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
             requestId,
             flowMode: runtimePolicy.flowMode,
             eventType: 'writeback_result',
-            payload: { mode: 'local_first', tool_name: toolName, success: true, draft_id: draftId },
+            payload: {
+              ...runtimeTelemetryBase,
+              mode: 'local_first',
+              tool_name: toolName,
+              success: true,
+              draft_id: draftId,
+              stage: 'writeback_queue',
+            },
           });
         } catch {
           // ignore telemetry failure
@@ -1544,7 +1638,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               requestId,
               flowMode: runtimePolicy.flowMode,
               eventType: 'error',
-              payload: { message: errText, stage: 'stream_text' },
+              payload: { ...runtimeTelemetryBase, message: errText, stage: 'stream_text' },
             });
           } catch {
             // ignore telemetry failure
@@ -1597,7 +1691,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           flowMode: runtimePolicy.flowMode,
           eventType: 'error',
           payload: {
+            ...runtimeTelemetryBase,
             message: error instanceof Error ? error.message : 'on_chat_message_failed',
+            stage: 'on_chat_message',
           },
         });
       } catch {
