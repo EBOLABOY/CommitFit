@@ -91,6 +91,7 @@ app.use('/agents/*', async (c, next) => {
     const debugEnabled = isAgentDebugEnabled(c.env.AGENT_DEBUG_ENABLED);
     const normalized = toErrorObject(error);
     const errorCode = resolveAgentErrorCode(normalized.message);
+    const statusCode = errorCode === AGENT_DO_QUOTA_ERROR ? 429 : 500;
 
     console.error('[agents] route failed', {
       error_id: errorId,
@@ -112,7 +113,7 @@ app.use('/agents/*', async (c, next) => {
       const body = debugEnabled
         ? `${errorCode}:${errorId}:${normalized.message}`
         : `${errorCode}:${errorId}`;
-      return new Response(body, { status: 500, headers });
+      return new Response(body, { status: statusCode, headers });
     }
 
     return new Response(
@@ -130,7 +131,7 @@ app.use('/agents/*', async (c, next) => {
           : {}),
       }),
       {
-        status: 500,
+        status: statusCode,
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
           'x-agent-error-id': errorId,
