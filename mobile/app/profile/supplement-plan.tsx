@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { api } from '../../services/api';
+import { useProfileStore } from '../../stores/profile';
 import { Card, Button, EmptyState, Skeleton } from '../../components/ui';
 import { Spacing, Radius, FontSize } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
@@ -12,13 +13,15 @@ import type { NutritionPlan } from '../../../shared/types';
 import {
   isSupplementPlan,
   parseStructuredSupplementPlan,
-  SUPPLEMENT_SECTION_ORDER,
+  getSupplementSectionOrder,
 } from '../../utils/nutrition-plan';
 import { parseContent } from '../../utils';
 
 export default function SupplementPlanScreen() {
   const Colors = useThemeColor();
   const router = useRouter();
+  const profile = useProfileStore((s) => s.profile);
+  const fetchProfile = useProfileStore((s) => s.fetchProfile);
   const [plans, setPlans] = useState<NutritionPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,6 +46,10 @@ export default function SupplementPlanScreen() {
     fetchPlans();
   }, [fetchPlans]);
 
+  useEffect(() => {
+    fetchProfile().catch(() => void 0);
+  }, [fetchProfile]);
+
   const handleRefresh = () => {
     setRefreshing(true);
     fetchPlans();
@@ -51,6 +58,11 @@ export default function SupplementPlanScreen() {
   const sortedPlans = useMemo(
     () => [...plans].sort((a, b) => b.plan_date.localeCompare(a.plan_date)),
     [plans]
+  );
+
+  const sectionOrder = useMemo(
+    () => getSupplementSectionOrder(profile),
+    [profile?.training_start_time, profile?.breakfast_time, profile?.lunch_time, profile?.dinner_time]
   );
 
   const isSectionExpanded = useCallback((planId: string, section: string, defaultExpanded = false) => {
@@ -136,7 +148,7 @@ export default function SupplementPlanScreen() {
                         </View>
                       )}
 
-                      {SUPPLEMENT_SECTION_ORDER.map((section) => {
+                      {sectionOrder.map((section) => {
                         const sectionItems = structured.sections[section];
                         const isWorkoutSection = section === '练前' || section === '练后';
                         // Main sections: hide if empty; workout sections: always show

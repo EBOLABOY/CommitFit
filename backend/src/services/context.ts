@@ -76,8 +76,60 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
     ? ctx.trainingGoals.map((g) => g.name).join('、')
     : '未设置';
 
+  const scheduleStr = (() => {
+    if (!ctx.profile) return null;
+    const trainingStart = typeof ctx.profile.training_start_time === 'string' ? ctx.profile.training_start_time : null;
+    const breakfastTime = typeof ctx.profile.breakfast_time === 'string' ? ctx.profile.breakfast_time : null;
+    const lunchTime = typeof ctx.profile.lunch_time === 'string' ? ctx.profile.lunch_time : null;
+    const dinnerTime = typeof ctx.profile.dinner_time === 'string' ? ctx.profile.dinner_time : null;
+
+    const parts: string[] = [];
+    if (trainingStart) parts.push(`训练开始${trainingStart}`);
+    if (breakfastTime) parts.push(`早餐${breakfastTime}`);
+    if (lunchTime) parts.push(`午餐${lunchTime}`);
+    if (dinnerTime) parts.push(`晚餐${dinnerTime}`);
+
+    const scheduleText = parts.length > 0 ? `作息时间：${parts.join('，')}` : null;
+
+    const toMinutes = (value: string | null): number | null => {
+      if (!value) return null;
+      const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+      if (!m) return null;
+      const hh = Number(m[1]);
+      const mm = Number(m[2]);
+      if (!Number.isInteger(hh) || !Number.isInteger(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+      return hh * 60 + mm;
+    };
+
+    const tMin = toMinutes(trainingStart);
+    const bMin = toMinutes(breakfastTime);
+    const lMin = toMinutes(lunchTime);
+    const dMin = toMinutes(dinnerTime);
+    if (tMin == null || bMin == null || lMin == null || dMin == null) return scheduleText;
+
+    const meals = [
+      { name: '早餐', min: bMin },
+      { name: '午餐', min: lMin },
+      { name: '晚餐', min: dMin },
+    ].sort((a, b) => a.min - b.min);
+    const insertIdx = (() => {
+      const idx = meals.findIndex((m) => tMin <= m.min);
+      return idx >= 0 ? idx : meals.length;
+    })();
+    const beforeMeals = meals.slice(0, insertIdx).map((m) => m.name);
+    const afterMeals = meals.slice(insertIdx).map((m) => m.name);
+    const mealOrder = [...beforeMeals, '练前餐', '练后餐', ...afterMeals];
+    const supplementOrder = [...beforeMeals, '练前', '练后', ...afterMeals, '睡前'];
+
+    return [
+      scheduleText,
+      `餐次顺序建议：${mealOrder.join(' → ')}`,
+      `补剂顺序建议：${supplementOrder.join(' → ')}`,
+    ].filter(Boolean).join('；');
+  })();
+
   const profileStr = ctx.profile
-    ? `身体基础数据：身高${ctx.profile.height || '未填'}cm，体重${ctx.profile.weight || '未填'}kg，出生日期${ctx.profile.birth_date || '未填'}，性别${ctx.profile.gender === 'male' ? '男' : ctx.profile.gender === 'female' ? '女' : '未填'}，训练目标：${trainingGoalStr}，训练年限${ctx.profile.training_years ?? '未填'}年`
+    ? `身体基础数据：身高${ctx.profile.height || '未填'}cm，体重${ctx.profile.weight || '未填'}kg，出生日期${ctx.profile.birth_date || '未填'}，性别${ctx.profile.gender === 'male' ? '男' : ctx.profile.gender === 'female' ? '女' : '未填'}，训练目标：${trainingGoalStr}${scheduleStr ? `，${scheduleStr}` : ''}，训练年限${ctx.profile.training_years ?? '未填'}年`
     : '用户尚未填写身体基础数据。';
 
   switch (role) {

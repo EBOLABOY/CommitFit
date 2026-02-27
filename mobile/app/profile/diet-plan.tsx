@@ -5,16 +5,19 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { api } from '../../services/api';
+import { useProfileStore } from '../../stores/profile';
 import { Card, Button, EmptyState, Skeleton } from '../../components/ui';
 import { Spacing, Radius, FontSize } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
 import type { NutritionPlan } from '../../../shared/types';
-import { isSupplementPlan, parseStructuredNutritionPlan, MEAL_ORDER } from '../../utils/nutrition-plan';
+import { isSupplementPlan, parseStructuredNutritionPlan, getMealOrder } from '../../utils/nutrition-plan';
 import { parseContent } from '../../utils';
 
 export default function DietPlanScreen() {
   const Colors = useThemeColor();
   const router = useRouter();
+  const profile = useProfileStore((s) => s.profile);
+  const fetchProfile = useProfileStore((s) => s.fetchProfile);
   const [plans, setPlans] = useState<NutritionPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -39,6 +42,10 @@ export default function DietPlanScreen() {
     fetchPlans();
   }, [fetchPlans]);
 
+  useEffect(() => {
+    fetchProfile().catch(() => void 0);
+  }, [fetchProfile]);
+
   const handleRefresh = () => {
     setRefreshing(true);
     fetchPlans();
@@ -47,6 +54,11 @@ export default function DietPlanScreen() {
   const sortedPlans = useMemo(
     () => [...plans].sort((a, b) => b.plan_date.localeCompare(a.plan_date)),
     [plans]
+  );
+
+  const mealOrder = useMemo(
+    () => getMealOrder(profile),
+    [profile?.training_start_time, profile?.breakfast_time, profile?.lunch_time, profile?.dinner_time]
   );
 
   const isSectionExpanded = useCallback((planId: string, section: string, defaultExpanded = false) => {
@@ -134,7 +146,7 @@ export default function DietPlanScreen() {
                         )}
                       </View>
 
-                      {MEAL_ORDER.map((meal) => {
+                      {mealOrder.map((meal) => {
                         const mealItems = structured.meals[meal];
                         const isWorkoutMeal = meal === '练前餐' || meal === '练后餐';
                         // Main meals: hide if empty; workout meals: always show (collapsed if empty)

@@ -4,6 +4,15 @@ const mealTypeSchema = z.enum(['breakfast', 'lunch', 'dinner', 'snack']);
 const conditionsModeSchema = z.enum(['upsert', 'replace_all', 'clear_all']);
 const trainingGoalsModeSchema = z.enum(['upsert', 'replace_all', 'clear_all']);
 const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const timeHHmmSchema = z.string()
+  .regex(/^(\d{1,2}):(\d{2})$/)
+  .refine((v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(v.trim());
+    if (!m) return false;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    return Number.isInteger(hh) && Number.isInteger(mm) && hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
+  }, { message: '必须是 HH:mm（24小时制，例如 06:00 或 15:00）' });
 
 export const syncProfileToolSchema = z.object({
   user: z.object({
@@ -16,6 +25,10 @@ export const syncProfileToolSchema = z.object({
     birth_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     gender: z.enum(['male', 'female']).optional(),
     training_goal: z.string().optional(),
+    training_start_time: timeHHmmSchema.optional(),
+    breakfast_time: timeHHmmSchema.optional(),
+    lunch_time: timeHHmmSchema.optional(),
+    dinner_time: timeHHmmSchema.optional(),
     training_years: z.number().optional(),
   }).optional(),
   conditions: z.array(z.object({

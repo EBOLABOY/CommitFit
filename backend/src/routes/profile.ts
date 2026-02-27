@@ -13,6 +13,17 @@ function isDateOnly(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) && isISODateString(value);
 }
 
+function normalizeTimeHHmm(value: string): string | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const hh = Number(match[1]);
+  const mm = Number(match[2]);
+  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+  if (hh < 0 || hh > 23) return null;
+  if (mm < 0 || mm > 59) return null;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
 // GET /api/profile
 profileRoutes.get('/', async (c) => {
   const userId = c.get('userId');
@@ -82,6 +93,70 @@ profileRoutes.put('/', async (c) => {
     }
     fields.push('gender = ?');
     values.push(body.gender);
+  }
+
+  if (body.training_start_time !== undefined) {
+    if (body.training_start_time === null) {
+      fields.push('training_start_time = ?');
+      values.push(null);
+    } else if (typeof body.training_start_time === 'string') {
+      const normalized = normalizeTimeHHmm(body.training_start_time);
+      if (!normalized) {
+        return c.json({ success: false, error: 'training_start_time 必须是 HH:mm（24小时制，例如 06:00 或 15:00）或 null' }, 400);
+      }
+      fields.push('training_start_time = ?');
+      values.push(normalized);
+    } else {
+      return c.json({ success: false, error: 'training_start_time 必须是 HH:mm（24小时制）或 null' }, 400);
+    }
+  }
+
+  if (body.breakfast_time !== undefined) {
+    if (body.breakfast_time === null) {
+      fields.push('breakfast_time = ?');
+      values.push(null);
+    } else if (typeof body.breakfast_time === 'string') {
+      const normalized = normalizeTimeHHmm(body.breakfast_time);
+      if (!normalized) {
+        return c.json({ success: false, error: 'breakfast_time 必须是 HH:mm（24小时制，例如 08:00）或 null' }, 400);
+      }
+      fields.push('breakfast_time = ?');
+      values.push(normalized);
+    } else {
+      return c.json({ success: false, error: 'breakfast_time 必须是 HH:mm（24小时制）或 null' }, 400);
+    }
+  }
+
+  if (body.lunch_time !== undefined) {
+    if (body.lunch_time === null) {
+      fields.push('lunch_time = ?');
+      values.push(null);
+    } else if (typeof body.lunch_time === 'string') {
+      const normalized = normalizeTimeHHmm(body.lunch_time);
+      if (!normalized) {
+        return c.json({ success: false, error: 'lunch_time 必须是 HH:mm（24小时制，例如 12:00）或 null' }, 400);
+      }
+      fields.push('lunch_time = ?');
+      values.push(normalized);
+    } else {
+      return c.json({ success: false, error: 'lunch_time 必须是 HH:mm（24小时制）或 null' }, 400);
+    }
+  }
+
+  if (body.dinner_time !== undefined) {
+    if (body.dinner_time === null) {
+      fields.push('dinner_time = ?');
+      values.push(null);
+    } else if (typeof body.dinner_time === 'string') {
+      const normalized = normalizeTimeHHmm(body.dinner_time);
+      if (!normalized) {
+        return c.json({ success: false, error: 'dinner_time 必须是 HH:mm（24小时制，例如 18:00）或 null' }, 400);
+      }
+      fields.push('dinner_time = ?');
+      values.push(normalized);
+    } else {
+      return c.json({ success: false, error: 'dinner_time 必须是 HH:mm（24小时制）或 null' }, 400);
+    }
   }
 
   if (body.training_years !== undefined) {

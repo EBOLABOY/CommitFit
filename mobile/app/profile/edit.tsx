@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -149,10 +149,17 @@ export default function EditProfileScreen() {
   // yyyy-mm-dd
   const [birthDate, setBirthDate] = useState('');
   const [gender, setGender] = useState<string | null>(null);
+  // HH:mm（24小时制）
+  const [trainingStartTime, setTrainingStartTime] = useState('');
+  const [breakfastTime, setBreakfastTime] = useState('');
+  const [lunchTime, setLunchTime] = useState('');
+  const [dinnerTime, setDinnerTime] = useState('');
   const [trainingYears, setTrainingYears] = useState('');
 
   // 日期弹窗状态
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [activeTimeField, setActiveTimeField] = useState<'training' | 'breakfast' | 'lunch' | 'dinner' | null>(null);
+  const [showTimePicker, setShowTimePicker] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -179,6 +186,10 @@ export default function EditProfileScreen() {
           if (d.weight != null) setWeight(String(d.weight));
           if (d.birth_date) setBirthDate(String(d.birth_date));
           if (d.gender) setGender(d.gender);
+          if (d.training_start_time != null) setTrainingStartTime(String(d.training_start_time));
+          if (d.breakfast_time != null) setBreakfastTime(String(d.breakfast_time));
+          if (d.lunch_time != null) setLunchTime(String(d.lunch_time));
+          if (d.dinner_time != null) setDinnerTime(String(d.dinner_time));
           if (d.training_years != null) setTrainingYears(String(d.training_years));
         }
       } finally {
@@ -214,6 +225,18 @@ export default function EditProfileScreen() {
     const wStr = initialProfile.weight != null ? String(initialProfile.weight) : '';
     if (weight !== wStr) return true;
 
+    const sStr = initialProfile.training_start_time != null ? String(initialProfile.training_start_time) : '';
+    if (trainingStartTime !== sStr) return true;
+
+    const bfStr = initialProfile.breakfast_time != null ? String(initialProfile.breakfast_time) : '';
+    if (breakfastTime !== bfStr) return true;
+
+    const lStr = initialProfile.lunch_time != null ? String(initialProfile.lunch_time) : '';
+    if (lunchTime !== lStr) return true;
+
+    const dStr = initialProfile.dinner_time != null ? String(initialProfile.dinner_time) : '';
+    if (dinnerTime !== dStr) return true;
+
     const tStr = initialProfile.training_years != null ? String(initialProfile.training_years) : '';
     if (trainingYears !== tStr) return true;
 
@@ -224,7 +247,7 @@ export default function EditProfileScreen() {
     if (gender !== gStr) return true;
 
     return false;
-  }, [pendingAvatarUri, initialMe, initialProfile, nickname, avatarKey, height, weight, trainingYears, birthDate, gender]);
+  }, [pendingAvatarUri, initialMe, initialProfile, nickname, avatarKey, height, weight, trainingStartTime, breakfastTime, lunchTime, dinnerTime, trainingYears, birthDate, gender]);
 
   const resizeAvatarIfNeeded = async (uri: string): Promise<string | null> => {
     try {
@@ -343,6 +366,10 @@ export default function EditProfileScreen() {
       if (weight) profilePatch.weight = parseFloat(weight);
       if (birthDate) profilePatch.birth_date = birthDate;
       if (gender) profilePatch.gender = gender as Gender;
+      if (trainingStartTime) profilePatch.training_start_time = trainingStartTime;
+      if (breakfastTime) profilePatch.breakfast_time = breakfastTime;
+      if (lunchTime) profilePatch.lunch_time = lunchTime;
+      if (dinnerTime) profilePatch.dinner_time = dinnerTime;
       if (trainingYears) profilePatch.training_years = parseFloat(trainingYears);
 
       if (Object.keys(profilePatch).length > 0) {
@@ -398,6 +425,68 @@ export default function EditProfileScreen() {
       const mm = String(selectedDate.getMonth() + 1).padStart(2, '0');
       const dd = String(selectedDate.getDate()).padStart(2, '0');
       setBirthDate(`${yyyy}-${mm}-${dd}`);
+    }
+  };
+
+  const getTimeValueByField = useCallback((): string => {
+    switch (activeTimeField) {
+      case 'training': return trainingStartTime;
+      case 'breakfast': return breakfastTime;
+      case 'lunch': return lunchTime;
+      case 'dinner': return dinnerTime;
+      default: return '';
+    }
+  }, [activeTimeField, trainingStartTime, breakfastTime, lunchTime, dinnerTime]);
+
+  const setTimeValueByField = useCallback((value: string) => {
+    switch (activeTimeField) {
+      case 'training': setTrainingStartTime(value); break;
+      case 'breakfast': setBreakfastTime(value); break;
+      case 'lunch': setLunchTime(value); break;
+      case 'dinner': setDinnerTime(value); break;
+      default: break;
+    }
+  }, [activeTimeField]);
+
+  const getPickerTime = () => {
+    const base = new Date();
+    const current = getTimeValueByField();
+    if (current) {
+      const match = /^(\d{1,2}):(\d{2})$/.exec(current.trim());
+      if (match) {
+        const hh = Number(match[1]);
+        const mm = Number(match[2]);
+        if (
+          Number.isInteger(hh) &&
+          Number.isInteger(mm) &&
+          hh >= 0 &&
+          hh <= 23 &&
+          mm >= 0 &&
+          mm <= 59
+        ) {
+          base.setHours(hh, mm, 0, 0);
+          return base;
+        }
+      }
+    }
+
+    // 默认时间（按常见作息给一个合理起点）
+    if (activeTimeField === 'breakfast') base.setHours(8, 0, 0, 0);
+    else if (activeTimeField === 'lunch') base.setHours(12, 0, 0, 0);
+    else if (activeTimeField === 'dinner') base.setHours(18, 0, 0, 0);
+    else base.setHours(6, 0, 0, 0); // training / unknown
+    return base;
+  };
+
+  const handleTimeChange = (event: any, selectedDate?: Date) => {
+    if (Platform.OS === 'android') {
+      setShowTimePicker(false);
+      setActiveTimeField(null);
+    }
+    if (selectedDate) {
+      const hh = String(selectedDate.getHours()).padStart(2, '0');
+      const mm = String(selectedDate.getMinutes()).padStart(2, '0');
+      setTimeValueByField(`${hh}:${mm}`);
     }
   };
 
@@ -501,6 +590,42 @@ export default function EditProfileScreen() {
               selected={gender}
               onSelect={setGender}
             />
+            <InlinePressableRow
+              label="训练开始时间"
+              value={trainingStartTime}
+              placeholder="请选择"
+              onPress={() => {
+                setActiveTimeField('training');
+                setShowTimePicker(true);
+              }}
+            />
+            <InlinePressableRow
+              label="早餐时间"
+              value={breakfastTime}
+              placeholder="请选择"
+              onPress={() => {
+                setActiveTimeField('breakfast');
+                setShowTimePicker(true);
+              }}
+            />
+            <InlinePressableRow
+              label="午餐时间"
+              value={lunchTime}
+              placeholder="请选择"
+              onPress={() => {
+                setActiveTimeField('lunch');
+                setShowTimePicker(true);
+              }}
+            />
+            <InlinePressableRow
+              label="晚餐时间"
+              value={dinnerTime}
+              placeholder="请选择"
+              onPress={() => {
+                setActiveTimeField('dinner');
+                setShowTimePicker(true);
+              }}
+            />
             <InlineInputRow
               label="训练年限"
               value={trainingYears}
@@ -563,6 +688,64 @@ export default function EditProfileScreen() {
           display="default"
           maximumDate={new Date()}
           onChange={handleDateChange}
+        />
+      )}
+
+      {/* ===== 作息时间选择器 ===== */}
+
+      {/* iOS Modal Spinner 形式 */}
+      {Platform.OS === 'ios' && (
+        <Modal visible={showTimePicker} transparent animationType="slide">
+          <View style={styles.modalOverlay}>
+            <Pressable
+              style={{ flex: 1 }}
+              onPress={() => {
+                setShowTimePicker(false);
+                setActiveTimeField(null);
+              }}
+            />
+            <View style={[styles.modalContent, { backgroundColor: Colors.surface }]}>
+              <View style={[styles.modalHeader, { borderBottomColor: Colors.borderLight }]}>
+                <Pressable
+                  onPress={() => {
+                    setShowTimePicker(false);
+                    setActiveTimeField(null);
+                  }}
+                  hitSlop={Spacing.md}
+                >
+                  <Text style={[styles.modalActionText, { color: Colors.textSecondary }]}>取消</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    setShowTimePicker(false);
+                    setActiveTimeField(null);
+                  }}
+                  hitSlop={Spacing.md}
+                >
+                  <Text style={[styles.modalActionText, { color: Colors.primary, fontWeight: '600' }]}>完成</Text>
+                </Pressable>
+              </View>
+              <DateTimePicker
+                value={getPickerTime()}
+                mode="time"
+                display="spinner"
+                is24Hour
+                textColor={Colors.text}
+                onChange={handleTimeChange}
+              />
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Android Default 弹窗形式 */}
+      {Platform.OS === 'android' && showTimePicker && (
+        <DateTimePicker
+          value={getPickerTime()}
+          mode="time"
+          display="default"
+          is24Hour
+          onChange={handleTimeChange}
         />
       )}
 

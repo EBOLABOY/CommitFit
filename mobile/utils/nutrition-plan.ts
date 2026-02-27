@@ -36,6 +36,72 @@ export const SUPPLEMENT_KEYWORDS = [
 export const MEAL_ORDER: MealName[] = ['早餐', '练前餐', '午餐', '练后餐', '晚餐'];
 export const SUPPLEMENT_SECTION_ORDER: SupplementSectionName[] = ['早餐', '练前', '午餐', '练后', '晚餐', '睡前'];
 
+export type DailyScheduleLike = {
+  training_start_time?: string | null;
+  breakfast_time?: string | null;
+  lunch_time?: string | null;
+  dinner_time?: string | null;
+};
+
+function timeToMinutes(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isInteger(hh) || !Number.isInteger(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
+export function getMealOrder(schedule?: DailyScheduleLike | null): MealName[] {
+  const tMin = timeToMinutes(schedule?.training_start_time);
+  const bMin = timeToMinutes(schedule?.breakfast_time);
+  const lMin = timeToMinutes(schedule?.lunch_time);
+  const dMin = timeToMinutes(schedule?.dinner_time);
+
+  // 训练时间/三餐时间缺失时，回退为默认展示顺序
+  if (tMin == null || bMin == null || lMin == null || dMin == null) return MEAL_ORDER;
+
+  const meals = [
+    { name: '早餐' as const, min: bMin },
+    { name: '午餐' as const, min: lMin },
+    { name: '晚餐' as const, min: dMin },
+  ].sort((a, b) => a.min - b.min);
+
+  const insertIdx = (() => {
+    const idx = meals.findIndex((m) => tMin <= m.min);
+    return idx >= 0 ? idx : meals.length;
+  })();
+
+  const beforeMeals = meals.slice(0, insertIdx).map((m) => m.name);
+  const afterMeals = meals.slice(insertIdx).map((m) => m.name);
+  return [...beforeMeals, '练前餐', '练后餐', ...afterMeals];
+}
+
+export function getSupplementSectionOrder(schedule?: DailyScheduleLike | null): SupplementSectionName[] {
+  const tMin = timeToMinutes(schedule?.training_start_time);
+  const bMin = timeToMinutes(schedule?.breakfast_time);
+  const lMin = timeToMinutes(schedule?.lunch_time);
+  const dMin = timeToMinutes(schedule?.dinner_time);
+
+  if (tMin == null || bMin == null || lMin == null || dMin == null) return SUPPLEMENT_SECTION_ORDER;
+
+  const meals = [
+    { name: '早餐' as const, min: bMin },
+    { name: '午餐' as const, min: lMin },
+    { name: '晚餐' as const, min: dMin },
+  ].sort((a, b) => a.min - b.min);
+
+  const insertIdx = (() => {
+    const idx = meals.findIndex((m) => tMin <= m.min);
+    return idx >= 0 ? idx : meals.length;
+  })();
+
+  const beforeMeals = meals.slice(0, insertIdx).map((m) => m.name);
+  const afterMeals = meals.slice(insertIdx).map((m) => m.name);
+  return [...beforeMeals, '练前', '练后', ...afterMeals, '睡前'];
+}
+
 export function isSupplementPlan(content: string): boolean {
   const normalized = parseContent(content).toLowerCase();
   return SUPPLEMENT_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));

@@ -118,6 +118,10 @@ export default function ProfileScreen() {
       if (age !== null) parts.push(`${age}岁`);
     }
     if (profile?.gender) parts.push(GENDER_LABELS[profile.gender] || profile.gender);
+    if (profile?.training_start_time) parts.push(`训练开始${profile.training_start_time}`);
+    if (profile?.breakfast_time) parts.push(`早餐${profile.breakfast_time}`);
+    if (profile?.lunch_time) parts.push(`午餐${profile.lunch_time}`);
+    if (profile?.dinner_time) parts.push(`晚餐${profile.dinner_time}`);
     if (profile?.training_years != null) parts.push(`训练${formatTrainingYears(profile.training_years)}年`);
     return parts.join(' · ');
   }, [profile]);
@@ -184,6 +188,9 @@ export default function ProfileScreen() {
           <View style={styles.tagRow}>
             {goalCount > 0 && (
               <Badge label={`${goalCount} 个目标`} color={Colors.primary} />
+            )}
+            {profile?.training_start_time && (
+              <Badge label={`训练开始 ${profile.training_start_time}`} color={Colors.success} />
             )}
             {profile?.training_years != null && (
               <Badge label={`训练 ${formatTrainingYears(profile.training_years)} 年`} color={Colors.info} />

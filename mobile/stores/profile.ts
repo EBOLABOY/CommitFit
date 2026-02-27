@@ -8,6 +8,10 @@ export interface ProfileData {
     weight: number | null;
     birth_date: string | null;
     gender: string | null;
+    training_start_time: string | null; // HH:mm（24小时制）
+    breakfast_time: string | null; // HH:mm（24小时制）
+    lunch_time: string | null; // HH:mm（24小时制）
+    dinner_time: string | null; // HH:mm（24小时制）
     training_years: number | null;
     training_goal: string | null;
 }

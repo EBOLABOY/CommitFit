@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   birth_date TEXT,               -- YYYY-MM-DD
   age INTEGER,
   gender TEXT,
+  training_start_time TEXT,      -- 每日训练开始时间（HH:mm，24小时制）
+  breakfast_time TEXT,           -- 早餐时间（HH:mm，24小时制）
+  lunch_time TEXT,               -- 午餐时间（HH:mm，24小时制）
+  dinner_time TEXT,              -- 晚餐时间（HH:mm，24小时制）
   training_years REAL,           -- 训练年限（年）
   training_goal TEXT,
   experience_level TEXT,

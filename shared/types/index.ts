@@ -42,6 +42,10 @@ export interface UserProfile {
   weight: number | null;
   birth_date: string | null; // YYYY-MM-DD
   gender: Gender | null;
+  training_start_time: string | null; // HH:mm（24小时制）
+  breakfast_time: string | null; // HH:mm（24小时制）
+  lunch_time: string | null; // HH:mm（24小时制）
+  dinner_time: string | null; // HH:mm（24小时制）
   training_years: number | null;
   training_goal: string | null;
   updated_at: string;
@@ -52,6 +56,10 @@ export interface UpdateProfileRequest {
   weight?: number;
   birth_date?: string | null;
   gender?: Gender;
+  training_start_time?: string | null; // HH:mm（24小时制）
+  breakfast_time?: string | null; // HH:mm（24小时制）
+  lunch_time?: string | null; // HH:mm（24小时制）
+  dinner_time?: string | null; // HH:mm（24小时制）
   training_years?: number | null;
   training_goal?: string;
 }

@@ -397,11 +397,19 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         };
       }
       const contextStr = buildContextForRole(activeRole, userContext);
+
+      const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
+      const writebackMode = writebackModeRaw.toLowerCase();
+      const isLocalFirstWriteback = writebackMode !== 'remote';
+      const writebackModeGuidance = isLocalFirstWriteback
+        ? '写回模式：Local-First（无审批）。写回工具返回 draft_id 后视为已提交同步请求，不要重复调用同一写回工具。'
+        : '写回模式：Remote（可能需要审批）。当工具需要确认时，提示用户在对话中回复“确认/取消”。';
       const architectureGuidanceLines: string[] = [
         [
           '工作约定：计划/方案/图片分析可使用 delegate_generate；需要保存/更新时先 query_user_data 拉取旧内容并决定覆盖或合并，再用对应写回工具写回（写回工具按模块拆分）。',
           '写回硬约束：凡是对用户数据的新增/删除/修改/清空/保存/同步请求，必须调用对应写回工具执行；未调用工具前，禁止在文字中宣称“已删除/已清空/已保存/已同步”。',
-          '工具选择：非破坏性更新优先用 *_patch / *_upsert / *_set；删除/清空使用 *_delete / *_clear_all（会要求用户确认）。',
+          '工具选择：非破坏性更新优先用 *_patch / *_upsert / *_set；删除/清空使用 *_delete / *_clear_all（破坏性操作请谨慎）。',
+          writebackModeGuidance,
           '禁止账号/密码类操作；禁止把客套话写入数据字段。',
           '对外沟通：不要提及模型切换、路由、委托或工具实现细节；只用用户可理解的语言描述你正在做的事。',
         ].join('\n'),
@@ -424,10 +432,6 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const model = getMainLLMModel(this.env);
       const modelAlias = 'LLM';
       this.broadcastCustom({ type: 'status', message: '回答中' });
-
-      const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
-      const writebackMode = writebackModeRaw.toLowerCase();
-      const isLocalFirstWriteback = writebackMode !== 'remote';
 
       const queryUserDataTool = tool({
         description: [
@@ -767,12 +771,62 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               const userFactsLines: string[] = [
                 '用户信息（供生成参考，缺失项可忽略）：',
                 profile
-                  ? [
-                    `- 年龄：${ageYears ?? '未知'}${ageYears != null ? '岁' : ''}`,
-                    `- 性别：${genderZh}`,
-                    `- 身高：${typeof profile.height === 'number' ? `${profile.height}cm` : '未填'}`,
-                    `- 训练年限：${typeof profile.training_years === 'number' ? `${profile.training_years}年` : '未填'}`,
-                  ].join('\n')
+                  ? (() => {
+                    const lines: string[] = [
+                      `- 年龄：${ageYears ?? '未知'}${ageYears != null ? '岁' : ''}`,
+                      `- 性别：${genderZh}`,
+                      `- 身高：${typeof profile.height === 'number' ? `${profile.height}cm` : '未填'}`,
+                      `- 训练年限：${typeof profile.training_years === 'number' ? `${profile.training_years}年` : '未填'}`,
+                    ];
+
+                    const trainingStart = typeof profile.training_start_time === 'string' ? profile.training_start_time : null;
+                    const breakfastTime = typeof profile.breakfast_time === 'string' ? profile.breakfast_time : null;
+                    const lunchTime = typeof profile.lunch_time === 'string' ? profile.lunch_time : null;
+                    const dinnerTime = typeof profile.dinner_time === 'string' ? profile.dinner_time : null;
+
+                    if (trainingStart) lines.push(`- 训练开始时间：${trainingStart}`);
+
+                    const mealTimeParts = [
+                      breakfastTime ? `早餐${breakfastTime}` : null,
+                      lunchTime ? `午餐${lunchTime}` : null,
+                      dinnerTime ? `晚餐${dinnerTime}` : null,
+                    ].filter(Boolean);
+                    if (mealTimeParts.length > 0) lines.push(`- 三餐时间：${mealTimeParts.join('，')}`);
+
+                    const toMinutes = (value: string | null): number | null => {
+                      if (!value) return null;
+                      const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+                      if (!m) return null;
+                      const hh = Number(m[1]);
+                      const mm = Number(m[2]);
+                      if (!Number.isInteger(hh) || !Number.isInteger(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+                      return hh * 60 + mm;
+                    };
+
+                    const tMin = toMinutes(trainingStart);
+                    const bMin = toMinutes(breakfastTime);
+                    const lMin = toMinutes(lunchTime);
+                    const dMin = toMinutes(dinnerTime);
+                    if (tMin != null && bMin != null && lMin != null && dMin != null) {
+                      const meals = [
+                        { name: '早餐', min: bMin },
+                        { name: '午餐', min: lMin },
+                        { name: '晚餐', min: dMin },
+                      ].sort((a, b) => a.min - b.min);
+                      const insertIdx = (() => {
+                        const idx = meals.findIndex((m) => tMin <= m.min);
+                        return idx >= 0 ? idx : meals.length;
+                      })();
+                      const beforeMeals = meals.slice(0, insertIdx).map((m) => m.name);
+                      const afterMeals = meals.slice(insertIdx).map((m) => m.name);
+                      const mealOrder = [...beforeMeals, '练前餐', '练后餐', ...afterMeals];
+                      const supplementOrder = [...beforeMeals, '练前', '练后', ...afterMeals, '睡前'];
+                      lines.push(`- 餐次顺序建议：${mealOrder.join(' → ')}`);
+                      lines.push(`- 补剂顺序建议：${supplementOrder.join(' → ')}`);
+                    }
+
+                    return lines.join('\n');
+                  })()
                   : '- 身体基础信息：未填写',
                 goals.length > 0 ? `- 目标：\n${goals.map((g) => `  - ${g}`).join('\n')}` : '- 目标：未设置',
                 conditions.length > 0 ? `- 伤病：\n${conditions.map((c) => `  - ${c}`).join('\n')}` : '- 伤病：无/未记录',
@@ -799,12 +853,14 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                   ].join('\n')
                   : kind === 'nutrition_plan'
                     ? [
-                      '生成饮食方案：按餐次给建议（早餐/午餐/晚餐/加餐）；给出蛋白/碳水/脂肪大致范围；',
+                      '生成饮食方案：用标题分段输出【练前餐/练后餐/早餐/午餐/晚餐】；给出蛋白/碳水/脂肪大致范围；',
+                      '如用户档案提供了“训练开始时间/三餐时间/餐次顺序建议”，必须按该顺序排版；练前餐/练后餐需围绕训练开始时间放置。',
                       '如有减脂/增肌目标，给出总热量策略与可执行替代食材。',
                     ].join('\n')
                     : kind === 'supplement_plan'
                       ? [
-                        '生成补剂方案：给出补剂清单、剂量、时机、注意事项；避免夸大疗效；',
+                        '生成补剂方案：用标题分段输出【练前/练后/早餐/午餐/晚餐/睡前】；给出补剂清单、剂量、时机、注意事项；避免夸大疗效；',
+                        '如用户档案提供了“训练开始时间/三餐时间/补剂顺序建议”，必须按该顺序排版；练前/练后需围绕训练开始时间放置。',
                         '对肝肾/睡眠/血压风险给出简短提示。',
                       ].join('\n')
                       : [
@@ -957,7 +1013,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
       const profilePatchTool = tool({
         description: [
-          '更新身体档案（user_profiles）。可写字段：身高/体重/出生日期/性别/训练年限/训练目标。',
+          '更新身体档案（user_profiles）。可写字段：身高/体重/出生日期/性别/训练开始时间/三餐时间/训练年限/训练目标。',
           '禁止操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
         ].join('\n'),
         inputSchema: profilePatchToolSchema,
@@ -968,6 +1024,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           if (args.weight !== undefined) patch.weight = args.weight;
           if (args.birth_date !== undefined) patch.birth_date = args.birth_date;
           if (args.gender !== undefined) patch.gender = args.gender;
+          if (args.training_start_time !== undefined) patch.training_start_time = args.training_start_time;
+          if (args.breakfast_time !== undefined) patch.breakfast_time = args.breakfast_time;
+          if (args.lunch_time !== undefined) patch.lunch_time = args.lunch_time;
+          if (args.dinner_time !== undefined) patch.dinner_time = args.dinner_time;
           if (args.training_years !== undefined) patch.training_years = args.training_years;
           if (args.training_goal !== undefined) patch.training_goal = args.training_goal;
           const summaryText = toSummaryText(args.summary_text, '更新身体档案');
@@ -991,10 +1051,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const conditionsReplaceAllTool = tool({
         description: [
           '先清空再写入伤病记录（conditions），用于“把伤病记录整体替换为这份列表”。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: conditionsReplaceAllToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '替换全部伤病记录');
           return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'replace_all' }, summaryText);
@@ -1004,10 +1064,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const conditionsDeleteTool = tool({
         description: [
           '按 id 删除伤病记录（conditions）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: conditionsDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除伤病记录');
           return applyOrDraftWriteback({ conditions_delete_ids: args.ids }, summaryText);
@@ -1017,10 +1077,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const conditionsClearAllTool = tool({
         description: [
           '清空全部伤病记录（conditions）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: conditionsClearAllToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '清空伤病记录');
           return applyOrDraftWriteback({ conditions_mode: 'clear_all' }, summaryText);
@@ -1043,10 +1103,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const trainingGoalsReplaceAllTool = tool({
         description: [
           '先清空再写入训练目标（training_goals），用于“把训练目标整体替换为这份列表”。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingGoalsReplaceAllToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '替换全部训练目标');
           return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'replace_all' }, summaryText);
@@ -1056,10 +1116,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const trainingGoalsDeleteTool = tool({
         description: [
           '按 id 删除训练目标（training_goals）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingGoalsDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除训练目标');
           return applyOrDraftWriteback({ training_goals_delete_ids: args.ids }, summaryText);
@@ -1069,10 +1129,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const trainingGoalsClearAllTool = tool({
         description: [
           '清空全部训练目标（training_goals）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingGoalsClearAllToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '清空训练目标');
           return applyOrDraftWriteback({ training_goals_mode: 'clear_all' }, summaryText);
@@ -1102,10 +1162,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const healthMetricsDeleteTool = tool({
         description: [
           '按 id 删除理化指标（health_metrics）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: healthMetricsDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除理化指标');
           return applyOrDraftWriteback({ health_metrics_delete_ids: args.ids }, summaryText);
@@ -1135,10 +1195,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const trainingPlanDeleteTool = tool({
         description: [
           '删除训练计划（training_plans）。同一天可能只有一份计划，删除按日期匹配。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingPlanDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除训练计划');
           const date = args.plan_date ?? '';
@@ -1161,10 +1221,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const nutritionPlanDeleteTool = tool({
         description: [
           '删除饮食/营养方案（nutrition_plans，不含补剂）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: nutritionPlanDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除营养方案');
           const date = args.plan_date ?? '';
@@ -1187,10 +1247,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const supplementPlanDeleteTool = tool({
         description: [
           '删除补剂方案（nutrition_plans）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: supplementPlanDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除补剂方案');
           const date = args.plan_date ?? '';
@@ -1211,10 +1271,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const dietRecordsDeleteTool = tool({
         description: [
           '删除饮食记录（diet_records）。优先按 id 删除；否则按 meal_type + record_date（可由上下文推断日期）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: dietRecordsDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除饮食记录');
           return applyOrDraftWriteback({ diet_records_delete: args.deletes }, summaryText);
@@ -1242,10 +1302,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const dailyLogDeleteTool = tool({
         description: [
           '删除每日日志（daily_logs）。',
-          '该操作是破坏性的，会要求用户确认。',
+          '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: dailyLogDeleteToolSchema,
-        needsApproval: true,
+        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除每日日志');
           const date = args.log_date ?? '';

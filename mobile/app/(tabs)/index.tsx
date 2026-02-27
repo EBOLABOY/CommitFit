@@ -27,6 +27,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuthStore } from '../../stores/auth';
 import { useProfileStore } from '../../stores/profile';
+import { useWritebackOutboxStore } from '../../stores/writeback-outbox';
 import { SectionHeader, Card, EmptyState, Skeleton, ProgressRing, GradientButton } from '../../components/ui';
 import { Spacing, Radius, FontSize, Shadows, Gradients } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
@@ -420,6 +421,7 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const user = useAuthStore((s) => s.user);
   const { fetchProfile } = useProfileStore();
+  const lastCommitted = useWritebackOutboxStore((s) => s.lastCommitted);
   const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -564,6 +566,33 @@ export default function HomeScreen() {
     loadCompletionState();
     cleanupOldCompletions();
   }, [fetchProfile, fetchTrainingOverview, fetchNutritionOverview, fetchDietRecords, fetchDailyLog, loadCompletionState, cleanupOldCompletions]);
+
+  // AI 写回提交成功后，自动刷新首页各模块，避免“已删除/已保存但首页仍显示旧数据”的错觉。
+  useEffect(() => {
+    const summary = lastCommitted?.summary;
+    if (!summary) return;
+
+    if (summary.user_updated || summary.profile_updated) {
+      fetchProfile(true);
+    }
+    if (summary.training_plan_created || summary.training_plan_deleted) {
+      fetchTrainingOverview();
+    }
+    if (
+      summary.nutrition_plan_created
+      || summary.nutrition_plan_deleted
+      || summary.supplement_plan_created
+      || summary.supplement_plan_deleted
+    ) {
+      fetchNutritionOverview();
+    }
+    if ((summary.diet_records_created || 0) > 0 || (summary.diet_records_deleted || 0) > 0) {
+      fetchDietRecords();
+    }
+    if (summary.daily_log_upserted || summary.daily_log_deleted) {
+      fetchDailyLog();
+    }
+  }, [lastCommitted?.draft_id, fetchProfile, fetchTrainingOverview, fetchNutritionOverview, fetchDietRecords, fetchDailyLog]);
 
   const handleRefresh = async () => {
     setRefreshing(true);

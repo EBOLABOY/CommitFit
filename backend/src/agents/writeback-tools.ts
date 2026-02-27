@@ -1,13 +1,22 @@
 import { z } from 'zod';
 
 const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const timeHHmmSchema = z.string()
+  .regex(/^(\d{1,2}):(\d{2})$/)
+  .refine((v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(v.trim());
+    if (!m) return false;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    return Number.isInteger(hh) && Number.isInteger(mm) && hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
+  }, { message: '必须是 HH:mm（24小时制，例如 06:00 或 15:00）' });
 const mealTypeSchema = z.enum(['breakfast', 'lunch', 'dinner', 'snack']);
 
 const summaryTextSchema = z
   .string()
   .max(200)
   .optional()
-  .describe('可选：对用户友好的中文摘要，说明要同步哪些数据（用于审批弹窗/操作反馈）');
+  .describe('可选：对用户友好的中文摘要，说明要执行哪些写回操作（用于操作提示/反馈；若启用 tool approval，则用于审批提示）');
 
 // --- User/Profile patches ---
 
@@ -24,6 +33,10 @@ export const profilePatchToolSchema = z.object({
   weight: z.number().min(20).max(500).optional(),
   birth_date: dateOnlySchema.optional(),
   gender: z.enum(['male', 'female']).optional(),
+  training_start_time: timeHHmmSchema.optional().describe('每日训练开始时间（24小时制 HH:mm，例如 06:00 或 15:00）'),
+  breakfast_time: timeHHmmSchema.optional().describe('早餐时间（24小时制 HH:mm，例如 08:00）'),
+  lunch_time: timeHHmmSchema.optional().describe('午餐时间（24小时制 HH:mm，例如 12:00）'),
+  dinner_time: timeHHmmSchema.optional().describe('晚餐时间（24小时制 HH:mm，例如 18:00）'),
   training_years: z.number().min(0).max(80).optional(),
   training_goal: z.string().max(200).optional(),
   summary_text: summaryTextSchema,

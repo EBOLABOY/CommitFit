@@ -79,6 +79,10 @@ interface ExtractedProfilePatch {
   birth_date?: string | null;
   gender?: Gender | null;
   training_goal?: string | null;
+  training_start_time?: string | null;
+  breakfast_time?: string | null;
+  lunch_time?: string | null;
+  dinner_time?: string | null;
   training_years?: number | null;
 }
 
@@ -292,6 +296,18 @@ function normalizeString(value: unknown, max = 500): string | null {
   if (!text) return null;
   if (text.length <= max) return text;
   return text.slice(0, max);
+}
+
+function normalizeTimeHHmm(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const hh = Number(match[1]);
+  const mm = Number(match[2]);
+  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+  if (hh < 0 || hh > 23) return null;
+  if (mm < 0 || mm > 59) return null;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
 function normalizeNumber(value: unknown, min: number, max: number): number | null {
@@ -598,7 +614,7 @@ export async function extractWritebackPayload(
     '训练计划（training_plan.content）通常来自【最终答复】中的计划正文。',
     '必须只输出 JSON，不要 markdown，不要解释。',
     'JSON 模板：',
-    '{"user":{"nickname":null,"avatar_key":null},"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"conditions_mode":"upsert","conditions_delete_ids":[],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","training_goals_delete_ids":[],"health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"health_metrics_update":[{"id":"","value":"","unit":null,"recorded_at":null}],"health_metrics_delete_ids":[],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"training_plan_delete_date":null,"nutrition_plan":{"content":"","plan_date":null},"nutrition_plan_delete_date":null,"supplement_plan":{"content":"","plan_date":null},"supplement_plan_delete_date":null,"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"diet_records_delete":[{"id":"","meal_type":"lunch","record_date":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null},"daily_log_delete_date":null}',
+    '{"user":{"nickname":null,"avatar_key":null},"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_start_time":null,"breakfast_time":null,"lunch_time":null,"dinner_time":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"conditions_mode":"upsert","conditions_delete_ids":[],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","training_goals_delete_ids":[],"health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"health_metrics_update":[{"id":"","value":"","unit":null,"recorded_at":null}],"health_metrics_delete_ids":[],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"training_plan_delete_date":null,"nutrition_plan":{"content":"","plan_date":null},"nutrition_plan_delete_date":null,"supplement_plan":{"content":"","plan_date":null},"supplement_plan_delete_date":null,"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"diet_records_delete":[{"id":"","meal_type":"lunch","record_date":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null},"daily_log_delete_date":null}',
     '',
     `用户最新问题：${message}`,
     historyText ? `近期对话：\n${historyText}` : '近期对话：无',
@@ -785,6 +801,54 @@ async function applyProfilePatch(db: D1Database, userId: string, patch: Extracte
   if (typeof patch.gender === 'string' && VALID_GENDER.includes(patch.gender as Gender)) {
     fields.push('gender = ?');
     values.push(patch.gender);
+  }
+  if (patch.training_start_time !== undefined) {
+    if (patch.training_start_time === null) {
+      fields.push('training_start_time = ?');
+      values.push(null);
+    } else {
+      const normalized = normalizeTimeHHmm(patch.training_start_time);
+      if (normalized) {
+        fields.push('training_start_time = ?');
+        values.push(normalized);
+      }
+    }
+  }
+  if (patch.breakfast_time !== undefined) {
+    if (patch.breakfast_time === null) {
+      fields.push('breakfast_time = ?');
+      values.push(null);
+    } else {
+      const normalized = normalizeTimeHHmm(patch.breakfast_time);
+      if (normalized) {
+        fields.push('breakfast_time = ?');
+        values.push(normalized);
+      }
+    }
+  }
+  if (patch.lunch_time !== undefined) {
+    if (patch.lunch_time === null) {
+      fields.push('lunch_time = ?');
+      values.push(null);
+    } else {
+      const normalized = normalizeTimeHHmm(patch.lunch_time);
+      if (normalized) {
+        fields.push('lunch_time = ?');
+        values.push(normalized);
+      }
+    }
+  }
+  if (patch.dinner_time !== undefined) {
+    if (patch.dinner_time === null) {
+      fields.push('dinner_time = ?');
+      values.push(null);
+    } else {
+      const normalized = normalizeTimeHHmm(patch.dinner_time);
+      if (normalized) {
+        fields.push('dinner_time = ?');
+        values.push(normalized);
+      }
+    }
   }
   if (
     typeof patch.training_years === 'number' &&

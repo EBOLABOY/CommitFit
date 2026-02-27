@@ -314,7 +314,7 @@ export default function AIChatScreen() {
     // Tool approval（官方 WS 协议）：不要排队，直接在当前流中发送确认/取消。
     if (pendingApproval) {
       if (pendingImage) {
-        Toast.show({ type: 'info', text1: '需要确认同步', text2: '请先回复“确认”或“取消”，再发送图片/消息' });
+        Toast.show({ type: 'info', text1: '需要确认操作', text2: '请先回复“确认”或“取消”，再发送图片/消息' });
         return;
       }
 
@@ -334,7 +334,7 @@ export default function AIChatScreen() {
         return;
       }
 
-      Toast.show({ type: 'info', text1: '需要确认同步', text2: '请回复“确认”或“取消”' });
+      Toast.show({ type: 'info', text1: '需要确认操作', text2: '请回复“确认”或“取消”' });
       return;
     }
 
@@ -577,28 +577,6 @@ export default function AIChatScreen() {
         </View>
       )}
 
-      {/* Tool approval (inline, no modal) */}
-      {!!pendingApproval && (
-        <View style={[styles.approvalBanner, { backgroundColor: Colors.warningLight ?? Colors.primaryLight, borderColor: (Colors.warning ?? Colors.primary) + '40' }]}>
-          <Ionicons name="help-circle-outline" size={16} color={Colors.warning ?? Colors.primary} />
-          <Text style={[styles.approvalBannerText, { color: Colors.text }]} numberOfLines={2}>
-            {(pendingApproval.summaryText || '需要确认同步操作') + '（回复“确认”或“取消”）'}
-          </Text>
-          <TouchableOpacity
-            style={[styles.approvalAction, { borderColor: Colors.border }]}
-            onPress={() => rejectToolCall(pendingApproval.toolCallId)}
-          >
-            <Text style={[styles.approvalActionText, { color: Colors.textSecondary }]}>取消</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.approvalAction, styles.approvalActionPrimary, { backgroundColor: Colors.primary }]}
-            onPress={() => approveToolCall(pendingApproval.toolCallId)}
-          >
-            <Text style={[styles.approvalActionText, { color: '#FFFFFF' }]}>确认</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
       {/* Writeback banner */}
       {!!writebackText && !isLoading && (
         <View style={[styles.writebackBanner, { backgroundColor: Colors.successLight, borderColor: Colors.success + '40' }]}>
@@ -798,33 +776,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   errorRetryButtonText: {
-    fontSize: FontSize.xs,
-    fontWeight: '700',
-  },
-
-  // Tool approval (inline)
-  approvalBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.xs,
-    borderWidth: 1,
-    borderRadius: Radius.md,
-    marginHorizontal: Spacing.md,
-    marginBottom: Spacing.sm,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.xs,
-  },
-  approvalBannerText: { flex: 1, fontSize: FontSize.xs },
-  approvalAction: {
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 6,
-    borderRadius: Radius.sm,
-    borderWidth: 1,
-  },
-  approvalActionPrimary: {
-    borderWidth: 0,
-  },
-  approvalActionText: {
     fontSize: FontSize.xs,
     fontWeight: '700',
   },
