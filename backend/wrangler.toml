@@ -19,6 +19,7 @@ AGENT_FLOW_MODE = "governed"
 AGENT_APPROVAL_FALLBACK = "auto_approve"
 AGENT_EXECUTION_PROFILE_DEFAULT = "build"
 AGENT_DEBUG_ENABLED = "false"
+AGENT_STREAM_PERSIST_ENABLED = "false"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # JWT_SECRET

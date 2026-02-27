@@ -284,6 +284,39 @@ function sanitizeMessagesForLLM(messages: AgentMessageLike[]): AgentMessageLike[
 }
 
 export class SupervisorAgent extends AIChatAgent<Bindings> {
+  /**
+   * 控制是否启用 AIChatAgent 的可恢复流持久化（chunk + metadata）。
+   * 关闭后仍保留实时流式广播，但不会把每个 chunk 写入 DO SQLite。
+   */
+  private isStreamPersistenceEnabled(): boolean {
+    const raw = this.env.AGENT_STREAM_PERSIST_ENABLED;
+    if (typeof raw !== 'string') return true;
+    const normalized = raw.trim().toLowerCase();
+    return !['false', '0', 'off', 'no'].includes(normalized);
+  }
+
+  protected override _startStream(requestId: string): string {
+    if (!this.isStreamPersistenceEnabled()) {
+      return `stream-disabled:${requestId}:${Date.now()}`;
+    }
+    return super._startStream(requestId);
+  }
+
+  protected override _storeStreamChunk(streamId: string, body: string): void {
+    if (!this.isStreamPersistenceEnabled()) return;
+    super._storeStreamChunk(streamId, body);
+  }
+
+  protected override _completeStream(streamId: string): void {
+    if (!this.isStreamPersistenceEnabled()) return;
+    super._completeStream(streamId);
+  }
+
+  protected override _markStreamError(streamId: string): void {
+    if (!this.isStreamPersistenceEnabled()) return;
+    super._markStreamError(streamId);
+  }
+
   // --- WebSocket JWT Authentication ---
 
   async onConnect(connection: Connection, ctx: ConnectionContext) {
