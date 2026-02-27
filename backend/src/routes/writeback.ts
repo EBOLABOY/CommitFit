@@ -73,7 +73,7 @@ writebackRoutes.post('/commit', async (c) => {
       }
       return c.json({
         success: true,
-        data: { draft_id: draftId, status: 'success', summary, committed: true },
+        data: { draft_id: draftId, status: 'success', state: 'success', summary, committed: true },
       });
     }
     if (existing.status === 'pending') {
@@ -89,7 +89,7 @@ writebackRoutes.post('/commit', async (c) => {
         .run();
 
       if (!takeover.meta?.changes) {
-        return c.json({ success: true, data: { draft_id: draftId, status: 'pending' } }, 202);
+        return c.json({ success: true, data: { draft_id: draftId, status: 'pending', state: 'pending_remote' } }, 202);
       }
 
       let payloadFromDb: unknown = null;
@@ -129,7 +129,7 @@ writebackRoutes.post('/commit', async (c) => {
           await recordWritebackAudit(c.env.DB, userId, 'writeback_commit', summary, null, contextText || '[commit]');
         } catch { /* ignore */ }
 
-        return c.json({ success: true, data: { draft_id: draftId, status: 'success', summary, committed: true } });
+        return c.json({ success: true, data: { draft_id: draftId, status: 'success', state: 'success', summary, committed: true } });
       } catch (error) {
         const errMsg = toErrMsg(error);
         try {
@@ -173,9 +173,9 @@ writebackRoutes.post('/commit', async (c) => {
       if (raced.summary_json) {
         try { summary = JSON.parse(raced.summary_json); } catch { /* ignore */ }
       }
-      return c.json({ success: true, data: { draft_id: draftId, status: 'success', summary, committed: true } });
+      return c.json({ success: true, data: { draft_id: draftId, status: 'success', state: 'success', summary, committed: true } });
     }
-    return c.json({ success: true, data: { draft_id: draftId, status: 'pending' } }, 202);
+    return c.json({ success: true, data: { draft_id: draftId, status: 'pending', state: 'pending_remote' } }, 202);
   }
 
   try {
@@ -194,7 +194,7 @@ writebackRoutes.post('/commit', async (c) => {
       await recordWritebackAudit(c.env.DB, userId, 'writeback_commit', summary, null, contextText || '[commit]');
     } catch { /* ignore */ }
 
-    return c.json({ success: true, data: { draft_id: draftId, status: 'success', summary } });
+    return c.json({ success: true, data: { draft_id: draftId, status: 'success', state: 'success', summary } });
   } catch (error) {
     const errMsg = toErrMsg(error);
     try {

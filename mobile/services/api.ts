@@ -7,6 +7,7 @@ import type {
   CreateTrainingGoalRequest,
   CreateDietRecordRequest,
   UpsertDailyLogRequest,
+  WritebackCommitResponseData,
 } from '../../shared/types';
 
 let authToken: string | null = null;
@@ -195,5 +196,5 @@ export const api = {
 
   // Local-First writeback commit (idempotent)
   commitWriteback: (data: { draft_id: string; payload: Record<string, unknown>; context_text?: string }) =>
-    request('/api/writeback/commit', { method: 'POST', body: JSON.stringify(data) }),
+    request<WritebackCommitResponseData>('/api/writeback/commit', { method: 'POST', body: JSON.stringify(data) }),
 };

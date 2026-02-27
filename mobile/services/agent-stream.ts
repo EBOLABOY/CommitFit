@@ -1,9 +1,7 @@
-import type { AIRole } from '../../shared/types';
 import { API_BASE_URL, SUPERVISOR_AGENT_NAMESPACE } from '../constants';
 import { getToken } from './api';
 
 type StreamSingleRoleOptions = {
-  role: AIRole;
   message: string;
   imageDataUri?: string;
   sessionId?: string;
@@ -95,7 +93,6 @@ function parseStreamChunkBody(body: unknown): Record<string, unknown> | null {
 
 export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): Promise<void> {
   const {
-    role,
     message,
     imageDataUri,
     sessionId = `utility-${Date.now()}`,
@@ -183,9 +180,10 @@ export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): P
           parts,
         },
       ],
-      preferred_role: role,
-      single_role: true,
       allow_profile_sync: allowProfileSync,
+      execution_profile: 'build' as const,
+      client_trace_id: requestId,
+      session_id: sessionId,
     };
 
     try {

@@ -16,7 +16,7 @@ const summaryTextSchema = z
   .string()
   .max(200)
   .optional()
-  .describe('可选：对用户友好的中文摘要，说明要执行哪些写回操作（用于操作提示/反馈；若启用 tool approval，则用于审批提示）');
+  .describe('可选：对用户友好的中文摘要，说明要执行哪些写回操作（用于操作提示/反馈）');
 
 // --- User/Profile patches ---
 

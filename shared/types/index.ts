@@ -9,6 +9,34 @@ export const AI_ROLE_NAMES: Record<AIRole, string> = {
   trainer: '私人教练',
 };
 
+// ============ Agent Governance ============
+
+export type AgentFlowMode = 'dual' | 'governed';
+export type AgentApprovalFallback = 'auto_approve' | 'reject';
+export type AgentExecutionProfile = 'plan' | 'build';
+export type AgentLifecycleState =
+  | 'idle'
+  | 'sending'
+  | 'streaming'
+  | 'tool_running'
+  | 'writeback_queued'
+  | 'writeback_committing'
+  | 'done'
+  | 'error';
+
+export type WritebackDraftStatus = 'queued' | 'committing' | 'pending_remote' | 'failed';
+
+export type WritebackCommitStatus = 'success' | 'pending' | 'failed' | string;
+export type WritebackCommitState = 'success' | 'pending_remote' | string;
+
+export interface WritebackCommitResponseData {
+  draft_id: string;
+  status: WritebackCommitStatus;
+  state?: WritebackCommitState;
+  summary?: OrchestrateAutoWriteSummary | null;
+  committed?: boolean;
+}
+
 // ============ Auth ============
 
 export interface RegisterRequest {
@@ -177,19 +205,6 @@ export interface ChatHistoryResponse {
   messages: ChatMessage[];
 }
 
-export interface OrchestrateHistoryMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-export interface OrchestrateChatRequest {
-  message: string;
-  history?: OrchestrateHistoryMessage[];
-  image?: string;
-  image_key?: string;
-  auto_writeback?: boolean;
-}
-
 export interface OrchestrateAutoWriteSummary {
   profile_updated: boolean;
   user_updated?: boolean;
@@ -294,18 +309,9 @@ export type AgentStreamEventPayload =
   | AgentErrorEventPayload
   | AgentDoneEventPayload;
 
-export interface OrchestrateChatResponse {
-  answer: string;
-  primary_role: AIRole;
-  collaborators: AIRole[];
-  routing_reason: string;
-  auto_writeback: boolean;
-  updates: OrchestrateAutoWriteSummary;
-}
-
 export interface WritebackAudit {
   id: string;
-  source: 'orchestrate' | 'orchestrate_stream' | string;
+  source: 'orchestrate_stream' | 'writeback_commit' | string;
   status: 'success' | 'failed' | string;
   summary: OrchestrateAutoWriteSummary | null;
   error: string | null;
@@ -335,6 +341,28 @@ export interface WSStatusEvent {
   message: string;
 }
 
+export interface WSPolicySnapshotEvent {
+  type: 'policy_snapshot';
+  flow_mode: AgentFlowMode;
+  approval_fallback: AgentApprovalFallback;
+  default_execution_profile: AgentExecutionProfile;
+  requested_execution_profile: AgentExecutionProfile;
+  effective_execution_profile: AgentExecutionProfile;
+  requested_allow_profile_sync: boolean;
+  effective_allow_profile_sync: boolean;
+  writeback_mode: string;
+  readonly_enforced: boolean;
+  shadow_readonly_would_apply?: boolean;
+}
+
+export interface WSLifecycleStateEvent {
+  type: 'lifecycle_state';
+  state: AgentLifecycleState;
+  at: string;
+  detail?: string;
+  request_id?: string;
+}
+
 export interface WSProfileSyncResultEvent {
   type: 'profile_sync_result';
   summary: OrchestrateAutoWriteSummary;
@@ -344,6 +372,8 @@ export type WSCustomEvent =
   | WSRoutingEvent
   | WSSupplementEvent
   | WSStatusEvent
+  | WSPolicySnapshotEvent
+  | WSLifecycleStateEvent
   | WSProfileSyncResultEvent;
 
 export interface ToolApprovalRequest {

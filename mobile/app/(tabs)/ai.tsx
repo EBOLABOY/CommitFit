@@ -46,39 +46,6 @@ const INLINE_THRESHOLD = 500 * 1024;
 
 const MESSAGE_IMAGE_WIDTH = Math.min(Dimensions.get('window').width * 0.58, 280);
 
-function normalizeApprovalDecision(raw: string): 'approve' | 'reject' | null {
-  const t = (raw || '').trim().replace(/\s+/g, '').toLowerCase();
-  if (!t) return null;
-
-  const approve = new Set([
-    '确认',
-    '确定',
-    '同意',
-    '是',
-    '好',
-    '好的',
-    'ok',
-    'okay',
-    'yes',
-    'y',
-    '确认同步',
-    '确认删除',
-  ]);
-  const reject = new Set([
-    '取消',
-    '拒绝',
-    '否',
-    '不要',
-    '算了',
-    'no',
-    'n',
-  ]);
-
-  if (approve.has(t)) return 'approve';
-  if (reject.has(t)) return 'reject';
-  return null;
-}
-
 const SUGGESTIONS = [
   '左膝疼，深蹲时加重，怎么处理？',
   '帮我分析一下这张餐食图片',
@@ -121,18 +88,17 @@ export default function AIChatScreen() {
   // WebSocket-based chat
   const {
     messages,
+    lifecycleState,
     isLoading,
     isConnected,
     error: wsError,
     streamStatus,
     routingInfo,
     supplements,
+    policySnapshot,
     writebackSummary,
-    pendingApproval,
     sendMessage,
     retryLastMessage,
-    approveToolCall,
-    rejectToolCall,
     clearMessages,
   } = useAgentChat();
 
@@ -311,33 +277,6 @@ export default function AIChatScreen() {
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    // Tool approval（官方 WS 协议）：不要排队，直接在当前流中发送确认/取消。
-    if (pendingApproval) {
-      if (pendingImage) {
-        Toast.show({ type: 'info', text1: '需要确认操作', text2: '请先回复“确认”或“取消”，再发送图片/消息' });
-        return;
-      }
-
-      const decision = normalizeApprovalDecision(text);
-      if (decision === 'approve') {
-        approveToolCall(pendingApproval.toolCallId);
-        setInput('');
-        setPendingImage(null);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        return;
-      }
-      if (decision === 'reject') {
-        rejectToolCall(pendingApproval.toolCallId);
-        setInput('');
-        setPendingImage(null);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-        return;
-      }
-
-      Toast.show({ type: 'info', text1: '需要确认操作', text2: '请回复“确认”或“取消”' });
-      return;
-    }
-
     // Prepare image data URI
     let imageDataUri: string | undefined;
     if (pendingImage) {
@@ -365,7 +304,7 @@ export default function AIChatScreen() {
     } else {
       sendMessage(text, imageDataUri);
     }
-  }, [isLoading, input, pendingImage, sendMessage, pendingApproval, approveToolCall, rejectToolCall]);
+  }, [isLoading, input, pendingImage, sendMessage]);
 
   const writebackText = useMemo(() => {
     if (!writebackSummary) return '';
@@ -391,6 +330,27 @@ export default function AIChatScreen() {
     if (writebackSummary.daily_log_deleted) tags.push('体重/睡眠日志 已删除');
     return tags.length > 0 ? `已同步：${tags.join('、')}` : '';
   }, [writebackSummary]);
+
+  const lifecycleHint = useMemo(() => {
+    switch (lifecycleState) {
+      case 'sending':
+        return '发送中';
+      case 'streaming':
+        return '回答中';
+      case 'tool_running':
+        return '工具执行中';
+      case 'writeback_queued':
+        return '写回排队中';
+      case 'writeback_committing':
+        return '写回提交中';
+      case 'done':
+        return '已完成';
+      case 'error':
+        return '发生错误';
+      default:
+        return '';
+    }
+  }, [lifecycleState]);
 
   const handleClear = () => {
     Alert.alert('清空对话', '确定要清空所有对话记录吗？', [
@@ -448,7 +408,18 @@ export default function AIChatScreen() {
           <View style={[styles.chatHeader, { borderBottomColor: Colors.borderLight }]}>
             <View style={styles.chatHeaderLeft}>
               <View style={[styles.connectionDot, { backgroundColor: isConnected ? Colors.success : Colors.danger }]} />
-              <Text style={[styles.chatHeaderTitle, { color: Colors.text }]}>AI 咨询</Text>
+              <View>
+                <Text style={[styles.chatHeaderTitle, { color: Colors.text }]}>AI 咨询</Text>
+                {(lifecycleHint || policySnapshot) && (
+                  <Text style={[styles.chatHeaderMeta, { color: Colors.textSecondary }]}>
+                    {[
+                      lifecycleHint || null,
+                      policySnapshot ? `模式:${policySnapshot.flow_mode}` : null,
+                      policySnapshot ? `执行:${policySnapshot.effective_execution_profile}` : null,
+                    ].filter(Boolean).join(' · ')}
+                  </Text>
+                )}
+              </View>
             </View>
             <TouchableOpacity onPress={handleClear} hitSlop={HitSlop.md}>
               <Ionicons name="trash-outline" size={20} color={Colors.textTertiary} />
@@ -461,16 +432,21 @@ export default function AIChatScreen() {
             extraData={streamStatus}
             keyExtractor={(item) => item.id}
              contentContainerStyle={styles.messageList}
-             renderItem={({ item }) => (
-               <Animated.View entering={FadeIn.duration(260)}>
-                 <View
-                   style={[
-                     styles.messageBubble,
-                     item.role === 'user'
-                       ? [styles.userBubble, { backgroundColor: Colors.primary }]
-                       : [styles.assistantBubble, { backgroundColor: Colors.surface }],
-                   ]}
-                 >
+             renderItem={({ item }) => {
+               // 最后一层兜底：非流式且无文本/图片的 assistant 不渲染，避免空白卡片外显。
+               if (item.role === 'assistant' && !item.isStreaming && !item.image && item.content.trim().length === 0) {
+                 return null;
+               }
+               return (
+                 <Animated.View entering={FadeIn.duration(260)}>
+                   <View
+                     style={[
+                       styles.messageBubble,
+                       item.role === 'user'
+                         ? [styles.userBubble, { backgroundColor: Colors.primary }]
+                         : [styles.assistantBubble, { backgroundColor: Colors.surface }],
+                     ]}
+                   >
                    {/* Routing chip */}
                    {item.role === 'assistant' && item.routingInfo && (
                      <View style={styles.routingChipRow}>
@@ -521,7 +497,7 @@ export default function AIChatScreen() {
                       )}
                     </View>
                    ) : null}
-                 </View>
+                   </View>
                  {/* Supplement cards */}
                  {item.role === 'assistant' && !item.isStreaming && item.supplements && item.supplements.length > 0 && (
                    <View style={styles.supplementsContainer}>
@@ -554,8 +530,9 @@ export default function AIChatScreen() {
                      ))}
                    </View>
                  )}
-              </Animated.View>
-            )}
+                 </Animated.View>
+                );
+              }}
           />
         </View>
       )}
@@ -619,9 +596,10 @@ export default function AIChatScreen() {
         <TextInput
           style={[styles.input, { backgroundColor: Colors.background, color: Colors.text }]}
           placeholder={
-            pendingApproval ? '需要确认：回复“确认”或“取消”以继续...' :
-              queuedMessage ? '已排队，AI 完成后自动发送...' :
-                pendingImage ? '描述一下这张图片...' : '输入你的问题...'
+            queuedMessage ? '已排队，AI 完成后自动发送...' :
+              lifecycleState === 'writeback_committing' ? '正在提交写回，请稍候...' :
+                lifecycleState === 'tool_running' ? '工具执行中，请稍候...' :
+              pendingImage ? '描述一下这张图片...' : '输入你的问题...'
           }
           placeholderTextColor={Colors.textTertiary}
           value={input}
@@ -649,9 +627,6 @@ export default function AIChatScreen() {
           />
         </TouchableOpacity>
       </View>
-
-      {/* Tool Approval Modal */}
-      {/* 已按官方推荐的 Tool Approval 协议改为内联 Banner + 对话输入确认，避免弹窗打断 */}
 
       {/* Full-screen image preview */}
       <Modal visible={!!previewImage} transparent animationType="fade" onRequestClose={() => setPreviewImage(null)}>
@@ -716,6 +691,7 @@ const styles = StyleSheet.create({
   },
   chatHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
   chatHeaderTitle: { fontSize: FontSize.lg, fontWeight: '700' },
+  chatHeaderMeta: { fontSize: FontSize.xs, marginTop: 2 },
 
   messageList: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: 20 },
   messageBubble: { maxWidth: '90%', padding: Spacing.lg, borderRadius: Radius.lg },

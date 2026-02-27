@@ -2,7 +2,7 @@ import { AIChatAgent, type OnChatMessageOptions } from '@cloudflare/ai-chat';
 import { streamText, tool, convertToModelMessages, stepCountIs, type StreamTextOnFinishCallback, type ToolSet } from 'ai';
 import type { Connection, ConnectionContext } from 'agents';
 import { jwtVerify } from 'jose';
-import type { AIRole } from '../../../shared/types';
+import type { AIRole, AgentExecutionProfile, AgentLifecycleState } from '../../../shared/types';
 import type { Bindings } from '../types';
 import { getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
 import { queryUserDataToolSchema } from './query-user-data-tool';
@@ -34,6 +34,8 @@ import {
 } from './writeback-tools';
 import type {
   CustomBroadcast,
+  LifecycleStateBroadcast,
+  PolicySnapshotBroadcast,
   RoutingBroadcast,
   ProfileSyncResultBroadcast,
 } from './contracts';
@@ -43,9 +45,11 @@ import {
   saveOrchestrateAssistantMessage,
   saveOrchestrateUserMessage,
   applyAutoWriteback,
+  recordAgentRuntimeEvent,
   recordWritebackAudit,
 } from '../services/orchestrator';
 import { getUserContext, buildContextForRole, estimateTokens } from '../services/context';
+import { decideExecutionBehavior, loadRuntimePolicy } from '../services/agent-policy';
 
 // Helper: extract plain text from a UIMessage's parts array
 function extractText(msg: { parts?: Array<{ type: string; text?: string }> }): string {
@@ -194,8 +198,6 @@ function trimConversationByTokenBudget<T extends AgentMessageLike>(messages: T[]
 
 // tool-invocation part 中"缺少结果"的状态集合
 const INCOMPLETE_TOOL_STATES = new Set([
-  'approval-requested',   // 等待用户审批，结果尚未确认
-  'approval-responded',   // 用户已响应但 LLM 续跑尚未写回 output
   'input-available',      // 输入已就绪但 execute 尚未完成
   'input-streaming',      // 输入流式接收中，尚未执行
 ]);
@@ -204,8 +206,8 @@ const INCOMPLETE_TOOL_STATES = new Set([
  * 清理消息历史中「孤立的 tool-invocation」part，防止 convertToModelMessages 报错。
  *
  * 问题根因：
- *   对于设置了 needsApproval 的工具（通常是 destructive 写操作），AIChatAgent 可能在
- *   approval-requested 状态时就把 assistant 消息持久化到 SQLite。
+ *   历史会话中若存在 input-available/input-streaming 等中间态，AIChatAgent 可能在
+ *   tool_result 尚未回写前就把 assistant 消息持久化到 SQLite。
  *   若用户此时关闭 App/断网，tool_result 永远不会写回。
  *   下次发消息时 convertToModelMessages 检测到"有 tool_call 无 tool_result"
  *   便抛出 "Tool result is missing for tool call ..." 错误。
@@ -318,16 +320,54 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
     const body = options?.body && typeof options.body === 'object'
       ? (options.body as Record<string, unknown>)
       : {};
-    const requestedRole = isValidPreferredRole(body.preferred_role) ? body.preferred_role : null;
+    const runtimePolicy = loadRuntimePolicy(this.env);
+    const executionDecision = decideExecutionBehavior(body, runtimePolicy);
     const activeRole = resolveActiveRole(this.env.ACTIVE_AI_ROLE);
-    const allowProfileSync = body.allow_profile_sync !== false;
+    const allowProfileSync = executionDecision.effectiveAllowProfileSync;
+    const requestId = typeof body.client_trace_id === 'string' && body.client_trace_id.trim()
+      ? body.client_trace_id.trim().slice(0, 128)
+      : crypto.randomUUID();
+    const sessionId = typeof body.session_id === 'string' && body.session_id.trim()
+      ? body.session_id.trim().slice(0, 64)
+      : 'default';
 
     const textResponse = (text: string): Response =>
       new Response(text, {
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       });
 
+    const emitLifecycleState = async (
+      state: AgentLifecycleState,
+      detail?: string
+    ): Promise<void> => {
+      const event: LifecycleStateBroadcast = {
+        type: 'lifecycle_state',
+        state,
+        at: new Date().toISOString(),
+        detail,
+        request_id: requestId,
+      };
+      this.broadcastCustom(event);
+      try {
+        await recordAgentRuntimeEvent(this.env.DB, {
+          userId,
+          sessionId,
+          requestId,
+          flowMode: runtimePolicy.flowMode,
+          eventType: 'lifecycle_state',
+          payload: {
+            state,
+            detail: detail || null,
+          },
+        });
+      } catch {
+        // ignore telemetry failure
+      }
+    };
+
     try {
+      await emitLifecycleState('sending', 'request_received');
+
       // 1. Extract latest user message from UIMessage parts
       const lastUserMsg = [...this.messages].reverse().find((m) => m.role === 'user');
       const userText = lastUserMsg ? extractText(lastUserMsg) : '';
@@ -336,6 +376,35 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
       if (!userText.trim()) {
         return textResponse('请先输入你的问题');
+      }
+
+      const policySnapshot: PolicySnapshotBroadcast = {
+        type: 'policy_snapshot',
+        flow_mode: runtimePolicy.flowMode,
+        approval_fallback: runtimePolicy.approvalFallback,
+        default_execution_profile: runtimePolicy.defaultExecutionProfile as AgentExecutionProfile,
+        requested_execution_profile: executionDecision.requestedExecutionProfile as AgentExecutionProfile,
+        effective_execution_profile: executionDecision.effectiveExecutionProfile as AgentExecutionProfile,
+        requested_allow_profile_sync: executionDecision.requestedAllowProfileSync,
+        effective_allow_profile_sync: executionDecision.effectiveAllowProfileSync,
+        writeback_mode: typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote',
+        readonly_enforced: executionDecision.readonlyEnforced,
+        shadow_readonly_would_apply: runtimePolicy.flowMode === 'dual'
+          ? executionDecision.shadowReadonlyWouldApply
+          : undefined,
+      };
+      this.broadcastCustom(policySnapshot);
+      try {
+        await recordAgentRuntimeEvent(this.env.DB, {
+          userId,
+          sessionId,
+          requestId,
+          flowMode: runtimePolicy.flowMode,
+          eventType: 'policy_snapshot',
+          payload: { ...policySnapshot },
+        });
+      } catch {
+        // ignore telemetry failure
       }
 
       // Persist user message before streaming so mid-stream failures still keep audit data.
@@ -360,10 +429,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const routing: { primaryRole: AIRole; collaborators: AIRole[]; reason: string } = {
         primaryRole: activeRole,
         collaborators: [],
-        reason:
-          requestedRole && requestedRole !== activeRole
-            ? `单角色固定为 ${ROLE_NAMES[activeRole]}，忽略请求角色 ${ROLE_NAMES[requestedRole]}`
-            : `单角色固定为 ${ROLE_NAMES[activeRole]}`,
+        reason: `单角色固定为 ${ROLE_NAMES[activeRole]}`,
       };
 
       // 4. Broadcast routing info
@@ -401,16 +467,22 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
       const writebackMode = writebackModeRaw.toLowerCase();
       const isLocalFirstWriteback = writebackMode !== 'remote';
+      const executionProfileGuidance = executionDecision.effectiveExecutionProfile === 'plan'
+        ? '执行模式：plan（只读分析）。禁止任何写回与修改操作。'
+        : '执行模式：build（可执行写回操作）。';
       const writebackModeGuidance = isLocalFirstWriteback
-        ? '写回模式：Local-First（无审批）。写回工具返回 draft_id 后视为已提交同步请求，不要重复调用同一写回工具。'
-        : '写回模式：Remote（可能需要审批）。当工具需要确认时，提示用户在对话中回复“确认/取消”。';
+        ? '写回模式：Local-First（无二次确认）。写回工具返回 draft_id 后视为已提交同步请求，不要重复调用同一写回工具。'
+        : '写回模式：Remote（无二次确认）。写回工具执行后直接返回结果。';
       const architectureGuidanceLines: string[] = [
         [
           '工作约定：计划/方案/图片分析可使用 delegate_generate；需要保存/更新时先 query_user_data 拉取旧内容并决定覆盖或合并，再用对应写回工具写回（写回工具按模块拆分）。',
           '写回硬约束：凡是对用户数据的新增/删除/修改/清空/保存/同步请求，必须调用对应写回工具执行；未调用工具前，禁止在文字中宣称“已删除/已清空/已保存/已同步”。',
           '工具选择：非破坏性更新优先用 *_patch / *_upsert / *_set；删除/清空使用 *_delete / *_clear_all（破坏性操作请谨慎）。',
+          executionProfileGuidance,
           writebackModeGuidance,
           '禁止账号/密码类操作；禁止把客套话写入数据字段。',
+          '输出约束：工具执行期间不要反复输出“好的，我现在…”这类阶段性确认语；同义确认语不要重复改写发送。',
+          '同一请求只输出一次面向用户的最终结论；中间步骤仅通过工具执行，不要拆分成多条近义回复。',
           '对外沟通：不要提及模型切换、路由、委托或工具实现细节；只用用户可理解的语言描述你正在做的事。',
         ].join('\n'),
       ];
@@ -423,7 +495,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         MIN_HISTORY_TOKEN_BUDGET,
         TOTAL_CONTEXT_TOKEN_BUDGET - systemPromptTokens - RESERVED_OUTPUT_TOKENS
       );
-      // 先清理历史中状态不完整的 tool-invocation（如 approval-requested），
+      // 先清理历史中状态不完整的 tool-invocation（如 input-streaming），
       // 防止 convertToModelMessages 因"有 tool_call 无 tool_result"而报错
       const sanitizedMessages = sanitizeMessagesForLLM([...this.messages]);
       const trimmedConversation = trimConversationByTokenBudget(sanitizedMessages, historyTokenBudget);
@@ -432,6 +504,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const model = getMainLLMModel(this.env);
       const modelAlias = 'LLM';
       this.broadcastCustom({ type: 'status', message: '回答中' });
+      await emitLifecycleState('streaming', 'model_stream_started');
 
       const queryUserDataTool = tool({
         description: [
@@ -674,6 +747,19 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                       ? '生成补剂'
                       : '分析中';
               agent.broadcastCustom({ type: 'status', message: statusMessage });
+              await emitLifecycleState('tool_running', `delegate_generate:${kind}`);
+              try {
+                await recordAgentRuntimeEvent(agent.env.DB, {
+                  userId,
+                  sessionId,
+                  requestId,
+                  flowMode: runtimePolicy.flowMode,
+                  eventType: 'tool_call',
+                  payload: { tool_name: 'delegate_generate', kind },
+                });
+              } catch {
+                // ignore telemetry failure
+              }
 
               // 只在委托生成时补充更丰富的用户事实（避免放大主链路 prompt）。
               const since30 = dateDaysAgoUTC(30);
@@ -945,8 +1031,32 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                 plan_date: planDateHint,
                 content,
               };
+              try {
+                await recordAgentRuntimeEvent(agent.env.DB, {
+                  userId,
+                  sessionId,
+                  requestId,
+                  flowMode: runtimePolicy.flowMode,
+                  eventType: 'tool_result',
+                  payload: { tool_name: 'delegate_generate', kind, success: true },
+                });
+              } catch {
+                // ignore telemetry failure
+              }
             } catch (err) {
               const message = err instanceof Error ? err.message : '委托生成失败';
+              try {
+                await recordAgentRuntimeEvent(agent.env.DB, {
+                  userId,
+                  sessionId,
+                  requestId,
+                  flowMode: runtimePolicy.flowMode,
+                  eventType: 'tool_result',
+                  payload: { tool_name: 'delegate_generate', kind: args.kind, success: false, error: message },
+                });
+              } catch {
+                // ignore telemetry failure
+              }
               yield { success: false, error: message };
             }
           })();
@@ -963,9 +1073,39 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
       const applyOrDraftWriteback = async (
         payload: Record<string, unknown>,
-        summaryText: string
+        summaryText: string,
+        toolName: string
       ): Promise<Record<string, unknown>> => {
+        await emitLifecycleState('tool_running', toolName);
+        try {
+          await recordAgentRuntimeEvent(this.env.DB, {
+            userId,
+            sessionId,
+            requestId,
+            flowMode: runtimePolicy.flowMode,
+            eventType: 'tool_call',
+            payload: {
+              tool_name: toolName,
+              payload_keys: Object.keys(payload || {}).slice(0, 20),
+            },
+          });
+        } catch {
+          // ignore telemetry failure
+        }
+
         if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
+          try {
+            await recordAgentRuntimeEvent(this.env.DB, {
+              userId,
+              sessionId,
+              requestId,
+              flowMode: runtimePolicy.flowMode,
+              eventType: 'tool_result',
+              payload: { tool_name: toolName, success: false, error: 'empty_payload' },
+            });
+          } catch {
+            // ignore telemetry failure
+          }
           return {
             success: false,
             error: '本次同步请求未包含可写回内容，请明确你要新增/修改/删除的内容。',
@@ -973,16 +1113,58 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         }
 
         if (!isLocalFirstWriteback) {
+          await emitLifecycleState('writeback_committing', toolName);
           const summary = await applyAutoWriteback(this.env.DB, userId, payload as any, { contextText: userText });
           const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
           this.broadcastCustom(syncBroadcast);
           try {
             await recordWritebackAudit(this.env.DB, userId, 'orchestrate_stream', summary, null, userText);
           } catch { /* ignore */ }
+          try {
+            await recordAgentRuntimeEvent(this.env.DB, {
+              userId,
+              sessionId,
+              requestId,
+              flowMode: runtimePolicy.flowMode,
+              eventType: 'tool_result',
+              payload: { tool_name: toolName, success: true, mode: 'remote' },
+            });
+            await recordAgentRuntimeEvent(this.env.DB, {
+              userId,
+              sessionId,
+              requestId,
+              flowMode: runtimePolicy.flowMode,
+              eventType: 'writeback_result',
+              payload: { mode: 'remote', tool_name: toolName, success: true },
+            });
+          } catch {
+            // ignore telemetry failure
+          }
           return { success: true, summary_text: summaryText, changes: summary };
         }
 
         const draftId = crypto.randomUUID();
+        await emitLifecycleState('writeback_queued', toolName);
+        try {
+          await recordAgentRuntimeEvent(this.env.DB, {
+            userId,
+            sessionId,
+            requestId,
+            flowMode: runtimePolicy.flowMode,
+            eventType: 'tool_result',
+            payload: { tool_name: toolName, success: true, mode: 'local_first', draft_id: draftId },
+          });
+          await recordAgentRuntimeEvent(this.env.DB, {
+            userId,
+            sessionId,
+            requestId,
+            flowMode: runtimePolicy.flowMode,
+            eventType: 'writeback_result',
+            payload: { mode: 'local_first', tool_name: toolName, success: true, draft_id: draftId },
+          });
+        } catch {
+          // ignore telemetry failure
+        }
         return {
           success: true,
           draft_id: draftId,
@@ -1001,13 +1183,12 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '重要：除非你已调用该工具并得到 success=true，否则不要说“已保存/已同步”。',
         ].join('\n'),
         inputSchema: userPatchToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const patch: Record<string, unknown> = {};
           if (args.nickname !== undefined) patch.nickname = args.nickname;
           if (args.avatar_key !== undefined) patch.avatar_key = args.avatar_key;
           const summaryText = toSummaryText(args.summary_text, '更新昵称/头像');
-          return applyOrDraftWriteback({ user: patch }, summaryText);
+          return applyOrDraftWriteback({ user: patch }, summaryText, 'user_patch');
         },
       });
 
@@ -1017,7 +1198,6 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '禁止操作账户/密码相关字段（email/password/account/password_hash/JWT 等）。',
         ].join('\n'),
         inputSchema: profilePatchToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const patch: Record<string, unknown> = {};
           if (args.height !== undefined) patch.height = args.height;
@@ -1031,7 +1211,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           if (args.training_years !== undefined) patch.training_years = args.training_years;
           if (args.training_goal !== undefined) patch.training_goal = args.training_goal;
           const summaryText = toSummaryText(args.summary_text, '更新身体档案');
-          return applyOrDraftWriteback({ profile: patch }, summaryText);
+          return applyOrDraftWriteback({ profile: patch }, summaryText, 'profile_patch');
         },
       });
 
@@ -1041,10 +1221,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '重要：写回内容必须来自用户原话/近期对话的事实，不要把客套话写入字段。',
         ].join('\n'),
         inputSchema: conditionsUpsertToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '同步伤病记录');
-          return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'upsert' }, summaryText);
+          return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'upsert' }, summaryText, 'conditions_upsert');
         },
       });
 
@@ -1054,10 +1233,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: conditionsReplaceAllToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '替换全部伤病记录');
-          return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'replace_all' }, summaryText);
+          return applyOrDraftWriteback({ conditions: args.conditions, conditions_mode: 'replace_all' }, summaryText, 'conditions_replace_all');
         },
       });
 
@@ -1067,10 +1245,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: conditionsDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除伤病记录');
-          return applyOrDraftWriteback({ conditions_delete_ids: args.ids }, summaryText);
+          return applyOrDraftWriteback({ conditions_delete_ids: args.ids }, summaryText, 'conditions_delete');
         },
       });
 
@@ -1080,10 +1257,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: conditionsClearAllToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '清空伤病记录');
-          return applyOrDraftWriteback({ conditions_mode: 'clear_all' }, summaryText);
+          return applyOrDraftWriteback({ conditions_mode: 'clear_all' }, summaryText, 'conditions_clear_all');
         },
       });
 
@@ -1093,10 +1269,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '重要：不要把“好的/已记录”等确认语写入目标。目标需来自用户原话/近期对话。',
         ].join('\n'),
         inputSchema: trainingGoalsUpsertToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '同步训练目标');
-          return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'upsert' }, summaryText);
+          return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'upsert' }, summaryText, 'training_goals_upsert');
         },
       });
 
@@ -1106,10 +1281,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingGoalsReplaceAllToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '替换全部训练目标');
-          return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'replace_all' }, summaryText);
+          return applyOrDraftWriteback({ training_goals: args.goals, training_goals_mode: 'replace_all' }, summaryText, 'training_goals_replace_all');
         },
       });
 
@@ -1119,10 +1293,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingGoalsDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除训练目标');
-          return applyOrDraftWriteback({ training_goals_delete_ids: args.ids }, summaryText);
+          return applyOrDraftWriteback({ training_goals_delete_ids: args.ids }, summaryText, 'training_goals_delete');
         },
       });
 
@@ -1132,30 +1305,27 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingGoalsClearAllToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '清空训练目标');
-          return applyOrDraftWriteback({ training_goals_mode: 'clear_all' }, summaryText);
+          return applyOrDraftWriteback({ training_goals_mode: 'clear_all' }, summaryText, 'training_goals_clear_all');
         },
       });
 
       const healthMetricsCreateTool = tool({
         description: '新增理化指标（health_metrics）。',
         inputSchema: healthMetricsCreateToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '新增理化指标');
-          return applyOrDraftWriteback({ health_metrics: args.metrics }, summaryText);
+          return applyOrDraftWriteback({ health_metrics: args.metrics }, summaryText, 'health_metrics_create');
         },
       });
 
       const healthMetricsUpdateTool = tool({
         description: '按 id 更新理化指标（health_metrics）。',
         inputSchema: healthMetricsUpdateToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '更新理化指标');
-          return applyOrDraftWriteback({ health_metrics_update: args.updates }, summaryText);
+          return applyOrDraftWriteback({ health_metrics_update: args.updates }, summaryText, 'health_metrics_update');
         },
       });
 
@@ -1165,10 +1335,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: healthMetricsDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除理化指标');
-          return applyOrDraftWriteback({ health_metrics_delete_ids: args.ids }, summaryText);
+          return applyOrDraftWriteback({ health_metrics_delete_ids: args.ids }, summaryText, 'health_metrics_delete');
         },
       });
 
@@ -1178,7 +1347,6 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '若用户说“今天/明天/本周”但未给出具体日期，可不填 plan_date，由系统从上下文推断。',
         ].join('\n'),
         inputSchema: trainingPlanSetToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '写入训练计划');
           return applyOrDraftWriteback({
@@ -1188,7 +1356,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               notes: args.notes,
               completed: args.completed,
             },
-          }, summaryText);
+          }, summaryText, 'training_plan_set');
         },
       });
 
@@ -1198,11 +1366,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: trainingPlanDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除训练计划');
           const date = args.plan_date ?? '';
-          return applyOrDraftWriteback({ training_plan_delete_date: date }, summaryText);
+          return applyOrDraftWriteback({ training_plan_delete_date: date }, summaryText, 'training_plan_delete');
         },
       });
 
@@ -1211,10 +1378,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '写入饮食/营养方案（nutrition_plans，不含补剂）。同一天只保留一份方案：写入会替换当天旧方案。',
         ].join('\n'),
         inputSchema: nutritionPlanSetToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '写入营养方案');
-          return applyOrDraftWriteback({ nutrition_plan: { plan_date: args.plan_date, content: args.content } }, summaryText);
+          return applyOrDraftWriteback({ nutrition_plan: { plan_date: args.plan_date, content: args.content } }, summaryText, 'nutrition_plan_set');
         },
       });
 
@@ -1224,11 +1390,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: nutritionPlanDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除营养方案');
           const date = args.plan_date ?? '';
-          return applyOrDraftWriteback({ nutrition_plan_delete_date: date }, summaryText);
+          return applyOrDraftWriteback({ nutrition_plan_delete_date: date }, summaryText, 'nutrition_plan_delete');
         },
       });
 
@@ -1237,10 +1402,9 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '写入补剂方案（nutrition_plans，content 会自动加上【补剂方案】前缀）。同一天只保留一份方案：写入会替换当天旧方案。',
         ].join('\n'),
         inputSchema: supplementPlanSetToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '写入补剂方案');
-          return applyOrDraftWriteback({ supplement_plan: { plan_date: args.plan_date, content: args.content } }, summaryText);
+          return applyOrDraftWriteback({ supplement_plan: { plan_date: args.plan_date, content: args.content } }, summaryText, 'supplement_plan_set');
         },
       });
 
@@ -1250,21 +1414,19 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: supplementPlanDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除补剂方案');
           const date = args.plan_date ?? '';
-          return applyOrDraftWriteback({ supplement_plan_delete_date: date }, summaryText);
+          return applyOrDraftWriteback({ supplement_plan_delete_date: date }, summaryText, 'supplement_plan_delete');
         },
       });
 
       const dietRecordsCreateTool = tool({
         description: '新增饮食记录（diet_records）。',
         inputSchema: dietRecordsCreateToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '新增饮食记录');
-          return applyOrDraftWriteback({ diet_records: args.records }, summaryText);
+          return applyOrDraftWriteback({ diet_records: args.records }, summaryText, 'diet_records_create');
         },
       });
 
@@ -1274,17 +1436,15 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: dietRecordsDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除饮食记录');
-          return applyOrDraftWriteback({ diet_records_delete: args.deletes }, summaryText);
+          return applyOrDraftWriteback({ diet_records_delete: args.deletes }, summaryText, 'diet_records_delete');
         },
       });
 
       const dailyLogUpsertTool = tool({
         description: '写入每日日志（daily_logs）：体重/睡眠/备注等。',
         inputSchema: dailyLogUpsertToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '写入每日日志');
           return applyOrDraftWriteback({
@@ -1295,7 +1455,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
               sleep_quality: args.sleep_quality,
               note: args.note,
             },
-          }, summaryText);
+          }, summaryText, 'daily_log_upsert');
         },
       });
 
@@ -1305,11 +1465,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '该操作是破坏性的，请谨慎。',
         ].join('\n'),
         inputSchema: dailyLogDeleteToolSchema,
-        needsApproval: !isLocalFirstWriteback,
         execute: async (args) => {
           const summaryText = toSummaryText(args.summary_text, '删除每日日志');
           const date = args.log_date ?? '';
-          return applyOrDraftWriteback({ daily_log_delete_date: date }, summaryText);
+          return applyOrDraftWriteback({ daily_log_delete_date: date }, summaryText, 'daily_log_delete');
         },
       });
 
@@ -1377,6 +1536,19 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           } catch {
             // ignore broadcast failure
           }
+          await emitLifecycleState('error', 'stream_text_error');
+          try {
+            await recordAgentRuntimeEvent(this.env.DB, {
+              userId,
+              sessionId,
+              requestId,
+              flowMode: runtimePolicy.flowMode,
+              eventType: 'error',
+              payload: { message: errText, stage: 'stream_text' },
+            });
+          } catch {
+            // ignore telemetry failure
+          }
         },
         onFinish: async (event) => {
           const text = event.text;
@@ -1384,12 +1556,16 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           // a. Save history to D1
           try {
             const metadata: Record<string, unknown> = {
+              request_id: requestId,
+              session_id: sessionId,
               primary_role: activeRole,
               collaborators: routing.collaborators,
               routing_reason: routing.reason,
               architecture: 'aichat_agent_ws',
               model_alias: modelAlias,
               model_route: 'main_model_with_delegate_tools',
+              flow_mode: runtimePolicy.flowMode,
+              execution_profile: executionDecision.effectiveExecutionProfile,
               tools_used: Array.from(new Set(event.steps.flatMap((s) => s.toolCalls.map((t) => t.toolName)))),
               delegate_generate_used: event.steps.some((s) => s.toolCalls.some((t) => t.toolName === 'delegate_generate')),
             };
@@ -1400,6 +1576,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           // Notify AIChatAgent that stream is done (type assertion needed due to ToolSet variance)
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           await onFinish(event as any);
+          await emitLifecycleState('done', 'stream_finished');
         },
       });
 
@@ -1410,6 +1587,21 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
         this.broadcastCustom({ type: 'status', message: '失败，请重试' });
       } catch {
         // ignore broadcast failure
+      }
+      await emitLifecycleState('error', 'on_chat_message_failed');
+      try {
+        await recordAgentRuntimeEvent(this.env.DB, {
+          userId,
+          sessionId,
+          requestId,
+          flowMode: runtimePolicy.flowMode,
+          eventType: 'error',
+          payload: {
+            message: error instanceof Error ? error.message : 'on_chat_message_failed',
+          },
+        });
+      } catch {
+        // ignore telemetry failure
       }
       const message = error instanceof Error && error.message
         ? error.message
@@ -1424,3 +1616,4 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
     this.broadcast(JSON.stringify(payload));
   }
 }
+

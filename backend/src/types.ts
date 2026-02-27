@@ -14,6 +14,9 @@ export type Bindings = {
   ALLOWED_ORIGINS?: string;
   ACTIVE_AI_ROLE?: string;
   WRITEBACK_MODE?: string; // remote / local_first
+  AGENT_FLOW_MODE?: string; // dual / governed
+  AGENT_APPROVAL_FALLBACK?: string; // auto_approve / reject
+  AGENT_EXECUTION_PROFILE_DEFAULT?: string; // build / plan
 };
 
 export type Variables = {

@@ -1,10 +1,12 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { OrchestrateAutoWriteSummary } from '../../shared/types';
+import type {
+  OrchestrateAutoWriteSummary,
+  WritebackCommitResponseData,
+  WritebackDraftStatus,
+} from '../../shared/types';
 import { api } from '../services/api';
-
-export type WritebackDraftStatus = 'pending' | 'committing' | 'failed';
 
 export interface WritebackDraft {
   draft_id: string;
@@ -34,6 +36,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+const WRITEBACK_OUTBOX_PERSIST_VERSION = 2;
+
+function normalizeDraftStatus(status: unknown): WritebackDraftStatus {
+  if (status === 'queued' || status === 'committing' || status === 'pending_remote' || status === 'failed') {
+    return status;
+  }
+  if (status === 'pending') return 'queued';
+  return 'queued';
+}
+
 export const useWritebackOutboxStore = create<WritebackOutboxState>()(
   persist(
     (set, get) => ({
@@ -56,7 +68,7 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
             summary_text: draft.summary_text || '已生成同步草稿',
             payload: isPlainObject(draft.payload) ? draft.payload : {},
             context_text: typeof draft.context_text === 'string' ? draft.context_text : '',
-            status: 'pending',
+            status: 'queued',
             attempts: 0,
             created_at: createdAt,
           };
@@ -98,21 +110,20 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
               throw new Error(res.error || '同步失败');
             }
 
-            const data = res.data as unknown;
-            if (!isPlainObject(data)) {
+            const data = res.data;
+            if (!data) {
               throw new Error('同步返回格式错误');
             }
 
-            const status = typeof data.status === 'string' ? data.status : '';
+            const status = data.status;
             if (status === 'success') {
-              const summaryRaw = data.summary as unknown;
-              if (!isPlainObject(summaryRaw)) {
+              const summary = data.summary as WritebackCommitResponseData['summary'];
+              if (!summary || !isPlainObject(summary)) {
                 // 允许服务端不返回 summary（例如并发 pending -> success 的极端情况）
                 set((state) => ({ ...state, drafts: state.drafts.filter((d) => d.draft_id !== draftId) }));
                 return null;
               }
 
-              const summary = summaryRaw as unknown as OrchestrateAutoWriteSummary;
               set((state) => ({
                 ...state,
                 drafts: state.drafts.filter((d) => d.draft_id !== draftId),
@@ -129,17 +140,17 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
               }
               set((state) => ({
                 ...state,
-                drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending' } : d)),
+                drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending_remote' } : d)),
               }));
               return null;
             }
 
-            throw new Error(typeof data.error === 'string' && data.error ? data.error : '同步失败');
+            throw new Error(res.error || '同步失败');
           }
 
           set((state) => ({
             ...state,
-            drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending' } : d)),
+            drafts: state.drafts.map((d) => (d.draft_id === draftId ? { ...d, status: 'pending_remote' } : d)),
           }));
           return null;
         } catch (error) {
@@ -161,7 +172,7 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
           // 逐个提交，保证在弱网下可控，不做并发轰炸
           const snapshot = get().drafts;
           for (const draft of snapshot) {
-            if (draft.status === 'pending' || draft.status === 'failed') {
+            if (draft.status === 'queued' || draft.status === 'pending_remote' || draft.status === 'failed') {
               // eslint-disable-next-line no-await-in-loop
               await get().commitDraft(draft.draft_id);
             }
@@ -176,6 +187,33 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
     {
       name: 'lianlema-writeback-outbox',
       storage: createJSONStorage(() => AsyncStorage),
+      version: WRITEBACK_OUTBOX_PERSIST_VERSION,
+      migrate: (persistedState: unknown, version: number) => {
+        if (!isPlainObject(persistedState)) return persistedState as WritebackOutboxState;
+        const state = persistedState as Record<string, unknown>;
+        const draftsRaw = Array.isArray(state.drafts) ? state.drafts : [];
+        const drafts = draftsRaw
+          .filter((d) => isPlainObject(d))
+          .map((d) => {
+            const draft = d as Record<string, unknown>;
+            return {
+              ...draft,
+              status: normalizeDraftStatus(draft.status),
+            };
+          });
+
+        if (version < 2) {
+          return {
+            ...state,
+            drafts,
+          } as WritebackOutboxState;
+        }
+
+        return {
+          ...state,
+          drafts,
+        } as WritebackOutboxState;
+      },
     }
   )
 );

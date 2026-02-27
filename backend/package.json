@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 execute lianlema-db --local --file=src/db/schema.sql"
+    "db:migrate": "wrangler d1 execute lianlema-db --local --file=src/db/schema.sql",
+    "eval:agent": "node evals/run.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.30",

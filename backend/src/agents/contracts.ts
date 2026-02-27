@@ -1,4 +1,11 @@
-import type { AIRole, OrchestrateAutoWriteSummary } from '../../../shared/types';
+import type {
+  AIRole,
+  AgentApprovalFallback,
+  AgentExecutionProfile,
+  AgentFlowMode,
+  AgentLifecycleState,
+  OrchestrateAutoWriteSummary,
+} from '../../../shared/types';
 
 export interface AgentHistoryMessage {
   role: 'user' | 'assistant';
@@ -42,6 +49,28 @@ export interface StatusBroadcast {
   message: string;
 }
 
+export interface PolicySnapshotBroadcast {
+  type: 'policy_snapshot';
+  flow_mode: AgentFlowMode;
+  approval_fallback: AgentApprovalFallback;
+  default_execution_profile: AgentExecutionProfile;
+  requested_execution_profile: AgentExecutionProfile;
+  effective_execution_profile: AgentExecutionProfile;
+  requested_allow_profile_sync: boolean;
+  effective_allow_profile_sync: boolean;
+  writeback_mode: string;
+  readonly_enforced: boolean;
+  shadow_readonly_would_apply?: boolean;
+}
+
+export interface LifecycleStateBroadcast {
+  type: 'lifecycle_state';
+  state: AgentLifecycleState;
+  at: string;
+  detail?: string;
+  request_id?: string;
+}
+
 export interface ProfileSyncResultBroadcast {
   type: 'profile_sync_result';
   summary: OrchestrateAutoWriteSummary;
@@ -51,4 +80,6 @@ export type CustomBroadcast =
   | RoutingBroadcast
   | SupplementBroadcast
   | StatusBroadcast
+  | PolicySnapshotBroadcast
+  | LifecycleStateBroadcast
   | ProfileSyncResultBroadcast;

@@ -16,6 +16,9 @@ LLM_BASE_URL = "https://api.izlx.de/v1"
 ALLOWED_ORIGINS = "http://localhost:8081"
 ACTIVE_AI_ROLE = "trainer"
 WRITEBACK_MODE = "local_first"
+AGENT_FLOW_MODE = "governed"
+AGENT_APPROVAL_FALLBACK = "auto_approve"
+AGENT_EXECUTION_PROFILE_DEFAULT = "build"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # JWT_SECRET

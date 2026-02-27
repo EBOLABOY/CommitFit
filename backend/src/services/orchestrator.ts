@@ -1,7 +1,4 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Bindings } from '../types';
-import { callLLMNonStream } from './llm';
-import { buildContextForRole, getUserContext, trimMessages } from './context';
 import { DOCTOR_SYSTEM_PROMPT } from '../prompts/doctor';
 import { REHAB_SYSTEM_PROMPT } from '../prompts/rehab';
 import { NUTRITIONIST_SYSTEM_PROMPT } from '../prompts/nutritionist';
@@ -9,12 +6,6 @@ import { TRAINER_SYSTEM_PROMPT } from '../prompts/trainer';
 import { isISODateString } from '../utils/validate';
 
 export type AIRole = 'doctor' | 'rehab' | 'nutritionist' | 'trainer';
-export type OrchestrateRole = AIRole | 'orchestrator';
-
-export interface OrchestrateHistoryMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
 
 export interface OrchestrateAutoWriteSummary {
   profile_updated: boolean;
@@ -36,31 +27,6 @@ export interface OrchestrateAutoWriteSummary {
   diet_records_deleted?: number;
   daily_log_upserted: boolean;
   daily_log_deleted?: boolean;
-}
-
-export interface OrchestrateResult {
-  answer: string;
-  primary_role: AIRole;
-  collaborators: AIRole[];
-  routing_reason: string;
-  auto_writeback: boolean;
-  updates: OrchestrateAutoWriteSummary;
-}
-
-interface OrchestrateParams {
-  env: Bindings;
-  userId: string;
-  message: string;
-  history: OrchestrateHistoryMessage[];
-  imageDataUri: string | null;
-  imageUrl: string | null;
-  autoWriteback: boolean;
-}
-
-interface RouteDecision {
-  primaryRole: AIRole;
-  collaborators: AIRole[];
-  reason: string;
 }
 
 type Gender = 'male' | 'female';
@@ -194,33 +160,6 @@ export const ROLE_NAMES: Record<AIRole, string> = {
   trainer: '私人教练',
 };
 
-const ROLE_KEYWORDS: Record<AIRole, string[]> = {
-  doctor: ['体检', '指标', '血压', '血糖', '血脂', '睾酮', '心率', '医学', '风险', '异常', '化验'],
-  rehab: ['疼痛', '受伤', '伤病', '康复', '拉伤', '扭伤', '膝盖', '腰', '肩', '术后', '复发'],
-  nutritionist: ['营养', '饮食', '热量', '蛋白质', '碳水', '脂肪', '补剂', '蛋白粉', '肌酸', '食谱', '减脂', '增肌餐'],
-  trainer: ['训练', '动作', '组数', '次数', '计划', '私教', '力量', '有氧', '深蹲', '卧推', '硬拉'],
-};
-const STRONG_NUTRITION_KEYWORDS = [
-  '补剂',
-  '蛋白粉',
-  '肌酸',
-  '鱼油',
-  '维生素',
-  '营养',
-  '饮食',
-  '热量',
-  '蛋白质',
-  '碳水',
-  '脂肪',
-  '早餐',
-  '午餐',
-  '晚餐',
-  '练前',
-  '练后',
-  '睡前',
-];
-
-const VALID_ROLES: AIRole[] = ['doctor', 'rehab', 'nutritionist', 'trainer'];
 const VALID_GENDER: Gender[] = ['male', 'female'];
 const VALID_SEVERITY: Severity[] = ['mild', 'moderate', 'severe'];
 const VALID_STATUS: ConditionStatus[] = ['active', 'recovered'];
@@ -232,7 +171,6 @@ const VALID_MEAL_TYPES: MealType[] = ['breakfast', 'lunch', 'dinner', 'snack'];
 const VALID_SLEEP_QUALITIES: SleepQuality[] = ['good', 'fair', 'poor'];
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-export const MAX_HISTORY_MESSAGES = 16;
 
 function asDateOnly(input: string | undefined): string {
   if (input && DATE_ONLY_REGEX.test(input)) return input;
@@ -310,6 +248,26 @@ function normalizeTimeHHmm(value: unknown): string | null {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
+function applyTimeFieldPatch(
+  patch: ExtractedProfilePatch,
+  fieldName: 'training_start_time' | 'breakfast_time' | 'lunch_time' | 'dinner_time',
+  fields: string[],
+  values: unknown[]
+): void {
+  const value = patch[fieldName];
+  if (value === undefined) return;
+  if (value === null) {
+    fields.push(`${fieldName} = ?`);
+    values.push(null);
+    return;
+  }
+  const normalized = normalizeTimeHHmm(value);
+  if (normalized) {
+    fields.push(`${fieldName} = ?`);
+    values.push(normalized);
+  }
+}
+
 function normalizeNumber(value: unknown, min: number, max: number): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   if (value < min || value > max) return null;
@@ -346,296 +304,6 @@ function isMeaningfulTrainingGoalName(name: string): boolean {
   return true;
 }
 
-function extractJsonObject(text: string): Record<string, unknown> | null {
-  const candidates: string[] = [];
-  const fenceMatches = text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
-  for (const m of fenceMatches) {
-    if (m[1]) candidates.push(m[1].trim());
-  }
-  candidates.push(text.trim());
-
-  for (const candidate of candidates) {
-    const start = candidate.indexOf('{');
-    const end = candidate.lastIndexOf('}');
-    const source = start >= 0 && end > start ? candidate.slice(start, end + 1) : candidate;
-    try {
-      const parsed = JSON.parse(source);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // continue
-    }
-  }
-
-  return null;
-}
-
-function scoreRoleByKeyword(text: string): Record<AIRole, number> {
-  const normalized = text.toLowerCase();
-  const scores: Record<AIRole, number> = { doctor: 0, rehab: 0, nutritionist: 0, trainer: 0 };
-  for (const role of VALID_ROLES) {
-    let score = 0;
-    for (const keyword of ROLE_KEYWORDS[role]) {
-      if (normalized.includes(keyword.toLowerCase())) score += 1;
-    }
-    scores[role] = score;
-  }
-  return scores;
-}
-
-export function chooseByKeyword(message: string, history: OrchestrateHistoryMessage[]): RouteDecision | null {
-  const normalizedMessage = message.toLowerCase();
-  const hasStrongNutritionIntent = STRONG_NUTRITION_KEYWORDS.some((keyword) =>
-    normalizedMessage.includes(keyword.toLowerCase())
-  );
-  if (hasStrongNutritionIntent) {
-    const needTrainerAssist = ROLE_KEYWORDS.trainer.some((keyword) =>
-      normalizedMessage.includes(keyword.toLowerCase())
-    );
-    return {
-      primaryRole: 'nutritionist',
-      collaborators: needTrainerAssist ? ['trainer'] : [],
-      reason: '强规则路由：营养/补剂问题优先营养师',
-    };
-  }
-
-  const joinedHistory = history.slice(-6).map((h) => h.content).join('\n');
-  const scores = scoreRoleByKeyword(`${message}\n${joinedHistory}`);
-  const ranked = [...VALID_ROLES]
-    .map((role) => ({ role, score: scores[role] }))
-    .sort((a, b) => b.score - a.score);
-
-  if (ranked[0].score <= 0) {
-    return null;
-  }
-
-  const primaryRole = ranked[0].role;
-  const collaborators = ranked
-    .slice(1)
-    .filter((item) => item.score >= Math.max(1, ranked[0].score - 1))
-    .map((item) => item.role)
-    .slice(0, 2);
-
-  return {
-    primaryRole,
-    collaborators,
-    reason: `关键词路由：${ROLE_NAMES[primaryRole]}`,
-  };
-}
-
-async function chooseByLLM(
-  env: Bindings,
-  message: string,
-  history: OrchestrateHistoryMessage[]
-): Promise<RouteDecision | null> {
-  const recentHistory = history
-    .slice(-8)
-    .map((item) => `${item.role === 'user' ? '用户' : '助手'}: ${item.content}`)
-    .join('\n');
-
-  const prompt = [
-    '你是健身咨询路由器。根据用户问题，选择主答角色，并可选 0-2 个协作角色。',
-    '可选角色：doctor, rehab, nutritionist, trainer。',
-    '输出必须是 JSON，且只输出 JSON：',
-    '{"primary_role":"trainer","collaborators":["nutritionist"],"reason":"一句话理由"}',
-    '',
-    `用户问题：${message}`,
-    recentHistory ? `近期对话：\n${recentHistory}` : '近期对话：无',
-  ].join('\n');
-
-  const response = await callLLMNonStream({
-    env,
-    messages: [
-      { role: 'system', content: '你是严格的 JSON 路由器。禁止输出 JSON 以外内容。' },
-      { role: 'user', content: prompt },
-    ],
-    timeoutMs: 30_000,
-    maxAttempts: 1,
-  });
-
-  const obj = extractJsonObject(response);
-  if (!obj) return null;
-
-  const primaryRole = obj.primary_role;
-  const collaboratorsRaw = obj.collaborators;
-  const reasonText = normalizeString(obj.reason, 120) || 'LLM 路由';
-
-  if (typeof primaryRole !== 'string' || !VALID_ROLES.includes(primaryRole as AIRole)) {
-    return null;
-  }
-
-  const collaborators = Array.isArray(collaboratorsRaw)
-    ? collaboratorsRaw
-        .filter((item): item is string => typeof item === 'string')
-        .filter((item): item is AIRole => VALID_ROLES.includes(item as AIRole))
-        .filter((item) => item !== primaryRole)
-        .slice(0, 2)
-    : [];
-
-  return {
-    primaryRole: primaryRole as AIRole,
-    collaborators,
-    reason: reasonText,
-  };
-}
-
-export async function decideRoute(
-  env: Bindings,
-  message: string,
-  history: OrchestrateHistoryMessage[]
-): Promise<RouteDecision> {
-  const byKeyword = chooseByKeyword(message, history);
-  if (byKeyword) return byKeyword;
-
-  try {
-    const byLLM = await chooseByLLM(env, message, history);
-    if (byLLM) return byLLM;
-  } catch {
-    // ignore and use fallback
-  }
-
-  return {
-    primaryRole: 'trainer',
-    collaborators: [],
-    reason: '兜底路由：私人教练',
-  };
-}
-
-async function generatePrimaryAnswer(
-  env: Bindings,
-  primaryRole: AIRole,
-  userContext: Awaited<ReturnType<typeof getUserContext>>,
-  history: OrchestrateHistoryMessage[],
-  message: string,
-  imageDataUri: string | null
-): Promise<string> {
-  type ContentPart =
-    | { type: 'text'; text: string }
-    | { type: 'image_url'; image_url: { url: string } };
-  const currentUserContent: string | ContentPart[] = imageDataUri
-    ? [
-        { type: 'image_url' as const, image_url: { url: imageDataUri } },
-        { type: 'text' as const, text: message },
-      ]
-    : message;
-
-  const context = buildContextForRole(primaryRole, userContext);
-  const systemPrompt = SYSTEM_PROMPTS[primaryRole] + '\n\n' + context;
-
-  const normalizedHistory = history
-    .filter((item) => item.content.trim().length > 0)
-    .slice(-MAX_HISTORY_MESSAGES)
-    .map((item) => ({ role: item.role, content: item.content }));
-
-  const messages = trimMessages(
-    [
-      { role: 'system' as const, content: systemPrompt },
-      ...normalizedHistory,
-      { role: 'user' as const, content: currentUserContent },
-    ],
-    {
-      maxSystemTokens: 8000,
-      maxHistoryTokens: 4000,
-      totalTokens: 12000,
-    }
-  );
-
-  return callLLMNonStream({ env, messages, timeoutMs: 60_000 });
-}
-
-export async function generateCollaboratorSupplements(
-  env: Bindings,
-  collaborators: AIRole[],
-  userContext: Awaited<ReturnType<typeof getUserContext>>,
-  userMessage: string,
-  primaryRole: AIRole,
-  primaryAnswer: string
-): Promise<Array<{ role: AIRole; content: string }>> {
-  if (collaborators.length === 0) return [];
-
-  const results = await Promise.all(
-    collaborators.map(async (role) => {
-      const prompt = [
-        `主答角色：${ROLE_NAMES[primaryRole]}`,
-        `用户问题：${userMessage}`,
-        `主答内容：${primaryAnswer}`,
-        '',
-        '请从你的专业角度补充 2-4 条可执行建议，避免重复主答。',
-        '输出纯文本，不要 JSON，不要前缀解释。',
-      ].join('\n');
-
-      const answer = await callLLMNonStream({
-        env,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPTS[role] + '\n\n' + buildContextForRole(role, userContext) },
-          { role: 'user', content: prompt },
-        ],
-        timeoutMs: 45_000,
-      });
-
-      return { role, content: answer.trim() };
-    })
-  );
-
-  return results.filter((item) => item.content.length > 0);
-}
-
-export function composeFinalAnswer(primaryRole: AIRole, primaryAnswer: string, supplements: Array<{ role: AIRole; content: string }>): string {
-  const main = primaryAnswer.trim();
-  if (supplements.length === 0) return main;
-
-  const supplementText = supplements
-    .map((item) => `【${ROLE_NAMES[item.role]}补充】\n${item.content}`)
-    .join('\n\n');
-
-  return `${main}\n\n---\n会诊补充\n${supplementText}`;
-}
-
-export async function extractWritebackPayload(
-  env: Bindings,
-  message: string,
-  history: OrchestrateHistoryMessage[],
-  answer: string
-): Promise<ExtractedWritebackPayload | null> {
-  const historyText = history
-    .slice(-8)
-    .map((item) => `${item.role === 'user' ? '用户' : '助手'}: ${item.content}`)
-    .join('\n');
-
-  const prompt = [
-    '你是结构化信息提取器。根据输入内容抽取可写回数据。',
-    '仅在信息明确时填写；不明确请填 null 或空数组；禁止臆造。',
-    '禁止操作账户/密码相关字段（例如 email、password、password_hash、JWT 等）。',
-    '当用户明确要求清空伤病记录时，设置 conditions_mode="clear_all"；若是“先清空再设置新伤病记录”，设置 conditions_mode="replace_all" 并填充 conditions。',
-    '当用户明确要求清空训练目标时，设置 training_goals_mode="clear_all"；若是“先清空再设置新目标”，设置 training_goals_mode="replace_all" 并填充 training_goals。',
-    '训练目标必须从【用户最新问题/近期对话】中抽取，不要把【最终答复】里的确认语或客套话写入 training_goals。',
-    '当用户提供多个训练目标（例如 1./2./3. 分段标题），请将每一段写成一个 training_goals 元素：name=标题，description=该段完整内容（可多行）。',
-    '训练计划（training_plan.content）通常来自【最终答复】中的计划正文。',
-    '必须只输出 JSON，不要 markdown，不要解释。',
-    'JSON 模板：',
-    '{"user":{"nickname":null,"avatar_key":null},"profile":{"height":null,"weight":null,"birth_date":null,"gender":null,"training_start_time":null,"breakfast_time":null,"lunch_time":null,"dinner_time":null,"training_goal":null,"training_years":null},"conditions":[{"name":"","description":null,"severity":null,"status":"active"}],"conditions_mode":"upsert","conditions_delete_ids":[],"training_goals":[{"name":"","description":null,"status":"active"}],"training_goals_mode":"upsert","training_goals_delete_ids":[],"health_metrics":[{"metric_type":"other","value":"","unit":null,"recorded_at":null}],"health_metrics_update":[{"id":"","value":"","unit":null,"recorded_at":null}],"health_metrics_delete_ids":[],"training_plan":{"content":"","plan_date":null,"notes":null,"completed":false},"training_plan_delete_date":null,"nutrition_plan":{"content":"","plan_date":null},"nutrition_plan_delete_date":null,"supplement_plan":{"content":"","plan_date":null},"supplement_plan_delete_date":null,"diet_records":[{"meal_type":"lunch","record_date":null,"food_description":"","foods_json":null,"calories":null,"protein":null,"fat":null,"carbs":null,"image_key":null}],"diet_records_delete":[{"id":"","meal_type":"lunch","record_date":null}],"daily_log":{"log_date":null,"weight":null,"sleep_hours":null,"sleep_quality":null,"note":null},"daily_log_delete_date":null}',
-    '',
-    `用户最新问题：${message}`,
-    historyText ? `近期对话：\n${historyText}` : '近期对话：无',
-    `最终答复：${answer}`,
-  ].join('\n');
-
-  const raw = await callLLMNonStream({
-    env,
-    messages: [
-      { role: 'system', content: '你只输出严格 JSON。' },
-      { role: 'user', content: prompt },
-    ],
-    timeoutMs: 40_000,
-    maxAttempts: 1,
-  });
-
-  const obj = extractJsonObject(raw);
-  if (!obj) return null;
-  return obj as unknown as ExtractedWritebackPayload;
-}
-
 function getTrainingGoalMergeKey(name: string): string {
   const compact = name.trim().toLowerCase().replace(/\s+/g, '');
   if (!compact) return '';
@@ -648,137 +316,6 @@ function getTrainingGoalMergeKey(name: string): string {
   if (/(体态|柔韧|灵活|活动度)/.test(compact)) return 'goal:mobility';
 
   return `goal:${compact}`;
-}
-
-function looksLikeTrainingPlanText(text: string): boolean {
-  const normalized = text.toLowerCase();
-  const hasPlanKeyword = /(训练计划|周计划|今日训练|明日训练|热身|正式训练|静态放松|动作|组数|次数|rpe)/i.test(text);
-  const hasStructuredHeading = /^##\s+/m.test(text) || /^###\s+/m.test(text);
-  const hasSetRepPattern = /(\d+\s*[x×*]\s*\d+|\d+\s*组|\d+\s*次)/i.test(normalized);
-  return hasPlanKeyword && (hasStructuredHeading || hasSetRepPattern);
-}
-
-function inferMealTypeFromText(text: string): MealType | null {
-  if (/(早餐|早饭|早晨)/.test(text)) return 'breakfast';
-  if (/(午餐|午饭|中饭)/.test(text)) return 'lunch';
-  if (/(晚餐|晚饭|晚食)/.test(text)) return 'dinner';
-  if (/(加餐|零食|夜宵)/.test(text)) return 'snack';
-  return null;
-}
-
-function hasMeaningfulObjectValue(value: unknown): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  return Object.values(value as Record<string, unknown>).some((item) => {
-    if (item === undefined || item === null) return false;
-    if (typeof item === 'string') return item.trim().length > 0;
-    return true;
-  });
-}
-
-function normalizeWritebackPayload(payload: ExtractedWritebackPayload | null | undefined): ExtractedWritebackPayload | null {
-  if (!payload) return null;
-  const normalized: ExtractedWritebackPayload = {};
-  const conditionsMode = normalizeConditionsMode(payload.conditions_mode);
-  const trainingGoalsMode = normalizeTrainingGoalsMode(payload.training_goals_mode);
-
-  if (hasMeaningfulObjectValue(payload.user)) normalized.user = payload.user;
-  if (hasMeaningfulObjectValue(payload.profile)) normalized.profile = payload.profile;
-  if (Array.isArray(payload.conditions) && payload.conditions.length > 0) {
-    normalized.conditions = payload.conditions;
-    normalized.conditions_mode = conditionsMode ?? 'upsert';
-  } else if (conditionsMode) {
-    normalized.conditions_mode = conditionsMode;
-  }
-  if (Array.isArray(payload.conditions_delete_ids) && payload.conditions_delete_ids.length > 0) {
-    normalized.conditions_delete_ids = payload.conditions_delete_ids;
-  }
-  if (Array.isArray(payload.training_goals) && payload.training_goals.length > 0) {
-    normalized.training_goals = payload.training_goals;
-    normalized.training_goals_mode = trainingGoalsMode ?? 'upsert';
-  } else if (trainingGoalsMode) {
-    normalized.training_goals_mode = trainingGoalsMode;
-  }
-  if (Array.isArray(payload.training_goals_delete_ids) && payload.training_goals_delete_ids.length > 0) {
-    normalized.training_goals_delete_ids = payload.training_goals_delete_ids;
-  }
-  if (Array.isArray(payload.health_metrics) && payload.health_metrics.length > 0) normalized.health_metrics = payload.health_metrics;
-  if (Array.isArray(payload.health_metrics_update) && payload.health_metrics_update.length > 0) {
-    normalized.health_metrics_update = payload.health_metrics_update;
-  }
-  if (Array.isArray(payload.health_metrics_delete_ids) && payload.health_metrics_delete_ids.length > 0) {
-    normalized.health_metrics_delete_ids = payload.health_metrics_delete_ids;
-  }
-  if (hasMeaningfulObjectValue(payload.training_plan)) normalized.training_plan = payload.training_plan;
-  if (typeof payload.training_plan_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.training_plan_delete_date)) {
-    normalized.training_plan_delete_date = payload.training_plan_delete_date;
-  }
-  if (hasMeaningfulObjectValue(payload.nutrition_plan)) normalized.nutrition_plan = payload.nutrition_plan;
-  if (typeof payload.nutrition_plan_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.nutrition_plan_delete_date)) {
-    normalized.nutrition_plan_delete_date = payload.nutrition_plan_delete_date;
-  }
-  if (hasMeaningfulObjectValue(payload.supplement_plan)) normalized.supplement_plan = payload.supplement_plan;
-  if (typeof payload.supplement_plan_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.supplement_plan_delete_date)) {
-    normalized.supplement_plan_delete_date = payload.supplement_plan_delete_date;
-  }
-  if (Array.isArray(payload.diet_records) && payload.diet_records.length > 0) normalized.diet_records = payload.diet_records;
-  if (Array.isArray(payload.diet_records_delete) && payload.diet_records_delete.length > 0) {
-    normalized.diet_records_delete = payload.diet_records_delete;
-  }
-  if (hasMeaningfulObjectValue(payload.daily_log)) normalized.daily_log = payload.daily_log;
-  if (typeof payload.daily_log_delete_date === 'string' && DATE_ONLY_REGEX.test(payload.daily_log_delete_date)) {
-    normalized.daily_log_delete_date = payload.daily_log_delete_date;
-  }
-  return Object.keys(normalized).length > 0 ? normalized : null;
-}
-
-export function hasWritebackChanges(summary: OrchestrateAutoWriteSummary): boolean {
-  return Boolean(
-    summary.user_updated ||
-    summary.profile_updated ||
-    summary.conditions_upserted > 0 ||
-    (summary.conditions_deleted || 0) > 0 ||
-    summary.training_goals_upserted > 0 ||
-    (summary.training_goals_deleted || 0) > 0 ||
-    summary.health_metrics_created > 0 ||
-    (summary.health_metrics_updated || 0) > 0 ||
-    (summary.health_metrics_deleted || 0) > 0 ||
-    summary.training_plan_created ||
-    summary.training_plan_deleted ||
-    summary.nutrition_plan_created ||
-    summary.nutrition_plan_deleted ||
-    summary.supplement_plan_created ||
-    summary.supplement_plan_deleted ||
-    summary.diet_records_created > 0 ||
-    (summary.diet_records_deleted || 0) > 0 ||
-    summary.daily_log_upserted
-    || summary.daily_log_deleted
-  );
-}
-
-export async function resolveWritebackPayload(
-  env: Bindings,
-  message: string,
-  history: OrchestrateHistoryMessage[],
-  answer: string
-): Promise<{
-  payload: ExtractedWritebackPayload | null;
-  extractionError: string | null;
-  fallbackUsed: boolean;
-}> {
-  let llmPayload: ExtractedWritebackPayload | null = null;
-  let extractionError: string | null = null;
-
-  try {
-    llmPayload = await extractWritebackPayload(env, message, history, answer);
-  } catch (error) {
-    extractionError = error instanceof Error ? error.message : '结构化提取失败';
-  }
-
-  return {
-    payload: normalizeWritebackPayload(llmPayload),
-    extractionError,
-    fallbackUsed: false,
-  };
 }
 
 async function applyProfilePatch(db: D1Database, userId: string, patch: ExtractedProfilePatch | undefined): Promise<boolean> {
@@ -802,54 +339,13 @@ async function applyProfilePatch(db: D1Database, userId: string, patch: Extracte
     fields.push('gender = ?');
     values.push(patch.gender);
   }
-  if (patch.training_start_time !== undefined) {
-    if (patch.training_start_time === null) {
-      fields.push('training_start_time = ?');
-      values.push(null);
-    } else {
-      const normalized = normalizeTimeHHmm(patch.training_start_time);
-      if (normalized) {
-        fields.push('training_start_time = ?');
-        values.push(normalized);
-      }
-    }
-  }
-  if (patch.breakfast_time !== undefined) {
-    if (patch.breakfast_time === null) {
-      fields.push('breakfast_time = ?');
-      values.push(null);
-    } else {
-      const normalized = normalizeTimeHHmm(patch.breakfast_time);
-      if (normalized) {
-        fields.push('breakfast_time = ?');
-        values.push(normalized);
-      }
-    }
-  }
-  if (patch.lunch_time !== undefined) {
-    if (patch.lunch_time === null) {
-      fields.push('lunch_time = ?');
-      values.push(null);
-    } else {
-      const normalized = normalizeTimeHHmm(patch.lunch_time);
-      if (normalized) {
-        fields.push('lunch_time = ?');
-        values.push(normalized);
-      }
-    }
-  }
-  if (patch.dinner_time !== undefined) {
-    if (patch.dinner_time === null) {
-      fields.push('dinner_time = ?');
-      values.push(null);
-    } else {
-      const normalized = normalizeTimeHHmm(patch.dinner_time);
-      if (normalized) {
-        fields.push('dinner_time = ?');
-        values.push(normalized);
-      }
-    }
-  }
+
+  // 时间字段：训练开始时间、三餐时间
+  applyTimeFieldPatch(patch, 'training_start_time', fields, values);
+  applyTimeFieldPatch(patch, 'breakfast_time', fields, values);
+  applyTimeFieldPatch(patch, 'lunch_time', fields, values);
+  applyTimeFieldPatch(patch, 'dinner_time', fields, values);
+
   if (
     typeof patch.training_years === 'number' &&
     Number.isFinite(patch.training_years) &&
@@ -1442,23 +938,23 @@ async function applyDailyLog(
 
   const weight =
     typeof dailyLog.weight === 'number' &&
-    Number.isFinite(dailyLog.weight) &&
-    dailyLog.weight >= 20 &&
-    dailyLog.weight <= 500
+      Number.isFinite(dailyLog.weight) &&
+      dailyLog.weight >= 20 &&
+      dailyLog.weight <= 500
       ? dailyLog.weight
       : null;
 
   const sleepHours =
     typeof dailyLog.sleep_hours === 'number' &&
-    Number.isFinite(dailyLog.sleep_hours) &&
-    dailyLog.sleep_hours >= 0 &&
-    dailyLog.sleep_hours <= 24
+      Number.isFinite(dailyLog.sleep_hours) &&
+      dailyLog.sleep_hours >= 0 &&
+      dailyLog.sleep_hours <= 24
       ? dailyLog.sleep_hours
       : null;
 
   const sleepQuality =
     typeof dailyLog.sleep_quality === 'string' &&
-    VALID_SLEEP_QUALITIES.includes(dailyLog.sleep_quality as SleepQuality)
+      VALID_SLEEP_QUALITIES.includes(dailyLog.sleep_quality as SleepQuality)
       ? dailyLog.sleep_quality
       : null;
 
@@ -1591,18 +1087,6 @@ export async function applyAutoWriteback(
   return summary;
 }
 
-export async function saveOrchestrateHistory(
-  db: D1Database,
-  userId: string,
-  userMessage: string,
-  answer: string,
-  imageUrl: string | null,
-  metadata?: Record<string, unknown> | null
-): Promise<void> {
-  await saveOrchestrateUserMessage(db, userId, userMessage, imageUrl);
-  await saveOrchestrateAssistantMessage(db, userId, answer, metadata);
-}
-
 export async function saveOrchestrateUserMessage(
   db: D1Database,
   userId: string,
@@ -1632,7 +1116,7 @@ export async function saveOrchestrateAssistantMessage(
     .run();
 }
 
-export type WritebackAuditSource = 'orchestrate' | 'orchestrate_stream' | 'writeback_commit';
+export type WritebackAuditSource = 'orchestrate_stream' | 'writeback_commit';
 
 export async function recordWritebackAudit(
   db: D1Database,
@@ -1653,106 +1137,41 @@ export async function recordWritebackAudit(
     .run();
 }
 
-export async function runAutoOrchestrate(params: OrchestrateParams): Promise<OrchestrateResult> {
-  const { env, userId, message, history, imageDataUri, imageUrl, autoWriteback } = params;
-  const normalizedHistory = history
-    .filter((item) => (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string')
-    .map((item) => ({ role: item.role, content: item.content.trim() }))
-    .filter((item) => item.content.length > 0)
-    .slice(-MAX_HISTORY_MESSAGES);
+export type AgentRuntimeEventType =
+  | 'policy_snapshot'
+  | 'lifecycle_state'
+  | 'tool_call'
+  | 'tool_result'
+  | 'writeback_result'
+  | 'error';
 
-  const userContext = await getUserContext(env.DB, userId);
-  const routing = await decideRoute(env, message, normalizedHistory);
+export interface AgentRuntimeEventInput {
+  userId: string;
+  sessionId: string;
+  requestId: string;
+  flowMode: string;
+  eventType: AgentRuntimeEventType;
+  payload?: Record<string, unknown> | null;
+}
 
-  const primaryAnswer = await generatePrimaryAnswer(
-    env,
-    routing.primaryRole,
-    userContext,
-    normalizedHistory,
-    message,
-    imageDataUri
-  );
-
-  const supplements = await generateCollaboratorSupplements(
-    env,
-    routing.collaborators,
-    userContext,
-    message,
-    routing.primaryRole,
-    primaryAnswer
-  );
-
-  const finalAnswer = composeFinalAnswer(routing.primaryRole, primaryAnswer, supplements);
-  await saveOrchestrateHistory(env.DB, userId, message, finalAnswer, imageUrl);
-
-  let updateSummary: OrchestrateAutoWriteSummary = {
-    profile_updated: false,
-    user_updated: false,
-    conditions_upserted: 0,
-    conditions_deleted: 0,
-    training_goals_upserted: 0,
-    training_goals_deleted: 0,
-    health_metrics_created: 0,
-    health_metrics_updated: 0,
-    health_metrics_deleted: 0,
-    training_plan_created: false,
-    training_plan_deleted: false,
-    nutrition_plan_created: false,
-    nutrition_plan_deleted: false,
-    supplement_plan_created: false,
-    supplement_plan_deleted: false,
-    diet_records_created: 0,
-    diet_records_deleted: 0,
-    daily_log_upserted: false,
-    daily_log_deleted: false,
-  };
-
-  if (autoWriteback) {
-    try {
-      const { payload, extractionError } = await resolveWritebackPayload(env, message, normalizedHistory, finalAnswer);
-      updateSummary = await applyAutoWriteback(env.DB, userId, payload, {
-        contextText: `${message}\n${finalAnswer}`,
-      });
-
-      const isWritebackFailed = Boolean(extractionError) && !hasWritebackChanges(updateSummary);
-      if (isWritebackFailed) {
-        throw new Error(extractionError || '自动写回失败');
-      }
-
-      try {
-        await recordWritebackAudit(env.DB, userId, 'orchestrate', updateSummary, null, message);
-      } catch {
-        // ignore audit failure
-      }
-    } catch (error) {
-      const logKey = `log:orchestrate-writeback-error:${Date.now()}:${crypto.randomUUID()}`;
-      const payload = {
-        userId,
-        error: error instanceof Error ? error.message : '自动写回失败',
-        at: new Date().toISOString(),
-      };
-      await env.KV.put(logKey, JSON.stringify(payload), { expirationTtl: 60 * 60 * 24 * 7 });
-      try {
-        await recordWritebackAudit(
-          env.DB,
-          userId,
-          'orchestrate',
-          null,
-          error instanceof Error ? error.message : '自动写回失败',
-          message
-        );
-      } catch {
-        // ignore audit failure
-      }
-    }
-  }
-
-  return {
-    answer: finalAnswer,
-    primary_role: routing.primaryRole,
-    collaborators: routing.collaborators,
-    routing_reason: routing.reason,
-    auto_writeback: autoWriteback,
-    updates: updateSummary,
-  };
+export async function recordAgentRuntimeEvent(
+  db: D1Database,
+  input: AgentRuntimeEventInput
+): Promise<void> {
+  const id = crypto.randomUUID();
+  const flowMode = (input.flowMode || '').slice(0, 24) || 'governed';
+  const payloadJson = input.payload ? JSON.stringify(input.payload) : null;
+  await db.prepare(
+    'INSERT INTO agent_runtime_events (id, user_id, session_id, request_id, flow_mode, event_type, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  )
+    .bind(
+      id,
+      input.userId,
+      input.sessionId || 'default',
+      input.requestId || 'unknown',
+      flowMode,
+      input.eventType,
+      payloadJson
+    )
+    .run();
 }

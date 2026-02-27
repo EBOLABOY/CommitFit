@@ -105,7 +105,6 @@ export default function TrainingGoalScreen() {
   }, [fetchGoals]);
 
   const { pickAndAnalyze, analyzing } = useImageAnalysis({
-    role: 'trainer',
     buildPrompt: useCallback(() =>
       '分析图片，提取训练目标。返回 JSON：\n{"goals":[{"name":"目标名称","description":"详细描述"}]}\n请严格只返回 JSON，不要 Markdown 解释。', []),
     onResult: handleImageResult,

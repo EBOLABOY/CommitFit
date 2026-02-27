@@ -101,7 +101,6 @@ export default function HealthMetricsScreen() {
   }, [fetchMetrics]);
 
   const { pickAndAnalyze, analyzing } = useImageAnalysis({
-    role: 'doctor',
     buildPrompt: useCallback(() =>
       `分析图片，提取化验单/体检报告中的健康指标。可识别的指标类型：${Object.entries(METRIC_TYPE_LABELS).map(([k, v]) => `${k}(${v})`).join('、')}。\n返回 JSON：\n{"metrics":[{"metric_type":"blood_pressure","value":"120/80","unit":"mmHg","recorded_at":"2024-01-15"}]}\n请严格只返回 JSON，不要 Markdown 解释。`, []),
     onResult: handleImageResult,

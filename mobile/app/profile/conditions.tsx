@@ -108,7 +108,6 @@ export default function ConditionsScreen() {
   }, [fetchConditions]);
 
   const { pickAndAnalyze, analyzing } = useImageAnalysis({
-    role: 'doctor',
     buildPrompt: useCallback(() =>
       `分析图片，提取医疗诊断/病历中的伤病信息。严重程度只能是 mild(轻度)/moderate(中度)/severe(重度)。\n返回 JSON：\n{"conditions":[{"name":"伤病名称","description":"描述","severity":"mild"}]}\n请严格只返回 JSON，不要 Markdown 解释。`, []),
     onResult: handleImageResult,

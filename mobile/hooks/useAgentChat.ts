@@ -5,6 +5,10 @@ import { API_BASE_URL, SUPERVISOR_AGENT_NAMESPACE } from '../constants';
 import { useWritebackOutboxStore } from '../stores/writeback-outbox';
 import type {
   AIRole,
+  AgentApprovalFallback,
+  AgentExecutionProfile,
+  AgentFlowMode,
+  AgentLifecycleState,
   OrchestrateAutoWriteSummary,
   SSERoutingEvent,
   SSESupplementEvent,
@@ -23,13 +27,6 @@ export interface ChatMessage {
   routingInfo?: SSERoutingEvent;
 }
 
-export interface PendingToolApproval {
-  toolCallId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  summaryText: string;
-}
-
 type IncomingUIMessage = {
   id: string;
   role: string;
@@ -41,12 +38,14 @@ type SendMessageOptions = {
   allowProfileSync?: boolean;
   appendUserMessage?: boolean;
   userMessageId?: string;
+  executionProfile?: AgentExecutionProfile;
 };
 
 type LastSentMessage = {
   text: string;
   imageDataUri?: string;
   allowProfileSync: boolean;
+  executionProfile: AgentExecutionProfile;
   userMessageId: string;
 };
 
@@ -67,6 +66,19 @@ type PersistedChatHistory = {
   savedAt: number;
   messages: PersistedChatMessage[];
 };
+
+export interface PolicySnapshot {
+  flow_mode: AgentFlowMode;
+  approval_fallback: AgentApprovalFallback;
+  default_execution_profile: AgentExecutionProfile;
+  requested_execution_profile: AgentExecutionProfile;
+  effective_execution_profile: AgentExecutionProfile;
+  requested_allow_profile_sync: boolean;
+  effective_allow_profile_sync: boolean;
+  writeback_mode: string;
+  readonly_enforced: boolean;
+  shadow_readonly_would_apply?: boolean;
+}
 
 const CHAT_HISTORY_VERSION = 1;
 const MAX_LOCAL_HISTORY_MESSAGES = 500;
@@ -129,9 +141,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 const WRITEBACK_TOOL_NAMES = new Set<string>([
-  // Backward compatibility (older backend versions)
-  'sync_profile',
-  // Current backend (split writeback tools)
+  // 当前后端（按模块拆分写回工具）
   'user_patch',
   'profile_patch',
   'conditions_upsert',
@@ -248,18 +258,26 @@ function extractMessageImage(message: IncomingUIMessage): string | undefined {
 
 function toChatMessage(message: IncomingUIMessage): ChatMessage | null {
   if (message.role !== 'user' && message.role !== 'assistant') return null;
-  return {
+  const converted: ChatMessage = {
     id: message.id,
     role: message.role as 'user' | 'assistant',
     content: extractMessageText(message),
     image: extractMessageImage(message),
   };
+
+  // 过滤无内容的 assistant 记录（常见于仅含工具过程的中间消息），避免空白气泡污染会话。
+  if (converted.role === 'assistant' && !converted.image && converted.content.trim().length === 0) {
+    return null;
+  }
+
+  return converted;
 }
 
 // --- Hook ---
 
 export function useAgentChat(sessionId = 'default') {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [lifecycleState, setLifecycleState] = useState<AgentLifecycleState>('idle');
   const [isLoading, setIsLoading] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -267,7 +285,7 @@ export function useAgentChat(sessionId = 'default') {
   const [routingInfo, setRoutingInfo] = useState<SSERoutingEvent | null>(null);
   const [supplements, setSupplements] = useState<SSESupplementEvent[]>([]);
   const [writebackSummary, setWritebackSummary] = useState<OrchestrateAutoWriteSummary | null>(null);
-  const [pendingApproval, setPendingApproval] = useState<PendingToolApproval | null>(null);
+  const [policySnapshot, setPolicySnapshot] = useState<PolicySnapshot | null>(null);
 
   const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => {
@@ -278,9 +296,6 @@ export function useAgentChat(sessionId = 'default') {
   const enqueueWritebackDraft = useWritebackOutboxStore((s) => s.enqueueDraft);
   const commitWritebackDraft = useWritebackOutboxStore((s) => s.commitDraft);
 
-  // 幂等处理：同一个 toolCallId 可能在断线重连/流恢复时被重复推送，避免重复弹窗。
-  const toolApprovalDecisionRef = useRef<Map<string, boolean>>(new Map());
-  const pendingApprovalRef = useRef<PendingToolApproval | null>(null);
   const toolCallInfoRef = useRef<Map<string, { toolName: string; input: Record<string, unknown> }>>(new Map());
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -293,15 +308,24 @@ export function useAgentChat(sessionId = 'default') {
   const lastSentRef = useRef<LastSentMessage | null>(null);
   const retryOnNextOpenRef = useRef(false);
   const retryLastMessageInternalRef = useRef<(() => void) | null>(null);
+  const lifecycleStateRef = useRef<AgentLifecycleState>('idle');
+  const policySnapshotRef = useRef<PolicySnapshot | null>(null);
 
   // Chat history: local-first cache (AsyncStorage) + remote DO sync.
   const localHistoryKeyRef = useRef<string | null>(null);
   const hasHydratedLocalHistoryRef = useRef(false);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const updateLifecycleState = useCallback((next: AgentLifecycleState) => {
+    lifecycleStateRef.current = next;
+    setLifecycleState(next);
+    const loading = next !== 'idle' && next !== 'done' && next !== 'error';
+    setIsLoading(loading);
+  }, []);
+
   useEffect(() => {
-    pendingApprovalRef.current = pendingApproval;
-  }, [pendingApproval]);
+    policySnapshotRef.current = policySnapshot;
+  }, [policySnapshot]);
 
   // --- Local history hydrate/persist ---
 
@@ -460,6 +484,7 @@ export function useAgentChat(sessionId = 'default') {
 
     const token = await getToken();
     if (!token) {
+      updateLifecycleState('error');
       setError('未登录，请重新登录');
       return;
     }
@@ -468,12 +493,14 @@ export function useAgentChat(sessionId = 'default') {
     const payload = decodeJwtPayload(token);
     if (!payload) {
       setIsConnected(false);
+      updateLifecycleState('error');
       setError('认证信息无效，请重新登录');
       return;
     }
     const uid = payload.sub || payload.userId || payload.user_id;
     if (typeof uid !== 'string' || !uid.trim()) {
       setIsConnected(false);
+      updateLifecycleState('error');
       setError('认证信息无效，请重新登录');
       return;
     }
@@ -482,6 +509,7 @@ export function useAgentChat(sessionId = 'default') {
     const userId = userIdRef.current;
     if (!userId) {
       setIsConnected(false);
+      updateLifecycleState('error');
       setError('认证信息无效，请重新登录');
       return;
     }
@@ -497,6 +525,9 @@ export function useAgentChat(sessionId = 'default') {
       }
       setIsConnected(true);
       setError(null);
+      if (lifecycleStateRef.current === 'error') {
+        updateLifecycleState('idle');
+      }
       try {
         ws.send(JSON.stringify({ type: 'cf_agent_stream_resume_request' }));
       } catch {
@@ -517,14 +548,17 @@ export function useAgentChat(sessionId = 'default') {
 
       if (event.code === 4001) {
         // Auth failure — don't reconnect
+        updateLifecycleState('error');
         setError('认证失败，请重新登录');
         return;
       }
       if (event.code === 4003) {
+        updateLifecycleState('error');
         setError('会话身份校验失败，请重新登录');
         return;
       }
       if (event.code === 4008) {
+        updateLifecycleState('error');
         setError(event.reason || '连接过于频繁，请稍后重试');
         return;
       }
@@ -538,13 +572,14 @@ export function useAgentChat(sessionId = 'default') {
     };
 
     ws.onerror = () => {
+      updateLifecycleState('error');
       setError('WebSocket 连接失败');
     };
 
     ws.onmessage = (event) => {
       handleWSMessage((event as { data?: unknown }).data);
     };
-  }, [sessionId]);
+  }, [sessionId, updateLifecycleState]);
 
   // --- Message handler ---
 
@@ -558,7 +593,7 @@ export function useAgentChat(sessionId = 'default') {
 
     if (msgType === 'cf_agent_use_chat_response') {
       if (parsed.error === true) {
-        setIsLoading(false);
+        updateLifecycleState('error');
         finalizeCurrentAssistant();
         setError(extractErrorText(parsed));
         return;
@@ -568,7 +603,7 @@ export function useAgentChat(sessionId = 'default') {
 
       if (done) {
         // Stream complete
-        setIsLoading(false);
+        updateLifecycleState('done');
         finalizeCurrentAssistant();
         return;
       }
@@ -615,6 +650,7 @@ export function useAgentChat(sessionId = 'default') {
         supplementsRef.current = [];
         setStreamStatus('');
         currentAssistantIdRef.current = null;
+        updateLifecycleState('idle');
         const key = localHistoryKeyRef.current;
         if (key) {
           AsyncStorage.removeItem(key).catch(() => {
@@ -627,16 +663,19 @@ export function useAgentChat(sessionId = 'default') {
       setMessages((prev) => {
         const serverIds = new Set(converted.map((m) => m.id));
         const prevById = new Map(prev.map((m) => [m.id, m] as const));
+        const nextIds = new Set<string>();
 
         // 以服务端顺序为准：先按 server snapshot 排列，再追加本地仅存在的（通常是刚发送但尚未广播的）。
         const next: ChatMessage[] = [];
         for (const sm of converted) {
           const local = prevById.get(sm.id);
           if (!local) {
-            next.push({ ...sm, isStreaming: false });
+            const item = { ...sm, isStreaming: false };
+            next.push(item);
+            nextIds.add(item.id);
             continue;
           }
-          next.push({
+          const item = {
             id: sm.id,
             role: sm.role,
             content: sm.content || local.content,
@@ -645,11 +684,26 @@ export function useAgentChat(sessionId = 'default') {
             primaryRole: local.primaryRole,
             supplements: local.supplements,
             routingInfo: local.routingInfo,
-          });
+          };
+          next.push(item);
+          nextIds.add(item.id);
         }
 
+        const streamingId = currentAssistantIdRef.current;
+        const pendingUserId = lastSentRef.current?.userMessageId || null;
+
         for (const m of prev) {
-          if (!serverIds.has(m.id)) next.push(m);
+          if (serverIds.has(m.id) || nextIds.has(m.id)) continue;
+          const keepStreamingAssistant = Boolean(
+            streamingId && m.role === 'assistant' && m.id === streamingId && m.isStreaming
+          );
+          const keepPendingUser = Boolean(
+            pendingUserId && m.role === 'user' && m.id === pendingUserId
+          );
+          if (keepStreamingAssistant || keepPendingUser) {
+            next.push(m);
+            nextIds.add(m.id);
+          }
         }
 
         return next;
@@ -693,6 +747,27 @@ export function useAgentChat(sessionId = 'default') {
           }
         }
 
+        if (converted.role === 'assistant') {
+          // 在流式过程中优先归并到“本轮最后一个 assistant”，避免把同一请求拆成多条近义气泡。
+          const inFlight = lifecycleStateRef.current !== 'idle'
+            && lifecycleStateRef.current !== 'done'
+            && lifecycleStateRef.current !== 'error';
+          if (inFlight) {
+            for (let i = prev.length - 1; i >= 0; i -= 1) {
+              if (prev[i].role !== 'assistant') continue;
+              const next = [...prev];
+              const existing = next[i];
+              next[i] = {
+                ...existing,
+                ...converted,
+                content: converted.content || existing.content,
+              };
+              currentAssistantIdRef.current = next[i].id;
+              return next;
+            }
+          }
+        }
+
         return [...prev, converted];
       });
       return;
@@ -731,19 +806,45 @@ export function useAgentChat(sessionId = 'default') {
       return;
     }
 
+    if (msgType === 'policy_snapshot') {
+      const snapshot: PolicySnapshot = {
+        flow_mode: (parsed.flow_mode as AgentFlowMode) || 'governed',
+        approval_fallback: (parsed.approval_fallback as AgentApprovalFallback) || 'auto_approve',
+        default_execution_profile: (parsed.default_execution_profile as AgentExecutionProfile) || 'build',
+        requested_execution_profile: (parsed.requested_execution_profile as AgentExecutionProfile) || 'build',
+        effective_execution_profile: (parsed.effective_execution_profile as AgentExecutionProfile) || 'build',
+        requested_allow_profile_sync: parsed.requested_allow_profile_sync !== false,
+        effective_allow_profile_sync: parsed.effective_allow_profile_sync !== false,
+        writeback_mode: typeof parsed.writeback_mode === 'string' ? parsed.writeback_mode : 'remote',
+        readonly_enforced: parsed.readonly_enforced === true,
+        shadow_readonly_would_apply: parsed.shadow_readonly_would_apply === true,
+      };
+      setPolicySnapshot(snapshot);
+      return;
+    }
+
+    if (msgType === 'lifecycle_state') {
+      const state = parsed.state as AgentLifecycleState | undefined;
+      if (state) {
+        updateLifecycleState(state);
+      }
+      return;
+    }
+
     if (msgType === 'profile_sync_result') {
       lastWritebackCommitAtRef.current = Date.now();
       setError(null);
       setWritebackSummary(parsed.summary as OrchestrateAutoWriteSummary);
+      updateLifecycleState('done');
       return;
     }
 
     if (msgType === 'error') {
       const errText = extractErrorText(parsed);
-      setIsLoading(false);
+      updateLifecycleState('error');
       setError(errText);
     }
-  }, []);
+  }, [updateLifecycleState]);
 
   // --- UIMessageStream chunk handler ---
 
@@ -753,6 +854,9 @@ export function useAgentChat(sessionId = 'default') {
     switch (chunkType) {
       case 'text-delta': {
         // Append text delta to current assistant message
+        if (lifecycleStateRef.current !== 'streaming') {
+          updateLifecycleState('streaming');
+        }
         const text = (chunk.delta as string) || (chunk.text as string);
         if (text) {
           appendToCurrentAssistant(text);
@@ -761,6 +865,7 @@ export function useAgentChat(sessionId = 'default') {
       }
       case 'text-start': {
         // A new text part started — ensure we have an assistant placeholder
+        updateLifecycleState('streaming');
         if (!currentAssistantIdRef.current) {
           const assistantId = `stream-${Date.now()}`;
           currentAssistantIdRef.current = assistantId;
@@ -778,6 +883,7 @@ export function useAgentChat(sessionId = 'default') {
         break;
       }
       case 'tool-input-available': {
+        updateLifecycleState('tool_running');
         const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
         const toolName = typeof chunk.toolName === 'string' ? chunk.toolName : '';
         if (!toolCallId || !toolName) break;
@@ -794,42 +900,23 @@ export function useAgentChat(sessionId = 'default') {
         break;
       }
       case 'tool-approval-request': {
-        // Tool needs human approval (toolName / input 需要从 tool-input-available 中关联)
+        // 按策略自动决策审批，避免阻塞主流程。
         const toolCallId = typeof chunk.toolCallId === 'string' ? chunk.toolCallId : '';
         if (!toolCallId) break;
-
-        const meta = toolCallInfoRef.current.get(toolCallId);
-        const toolName = meta?.toolName || 'unknown';
-        const input = meta?.input || {};
-
-        // 若已对该 toolCallId 做出过决定（同意/拒绝），直接重发决定，避免重复弹窗。
-        const decided = toolApprovalDecisionRef.current.get(toolCallId);
-        if (typeof decided === 'boolean') {
-          const ws = wsRef.current;
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            try {
-              ws.send(JSON.stringify({
-                type: 'cf_agent_tool_approval',
-                toolCallId,
-                approved: decided,
-                autoContinue: true,
-              }));
-            } catch {
-              // ignore resend failure
-            }
-          }
-          break;
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) break;
+        const approvalFallback = policySnapshotRef.current?.approval_fallback || 'auto_approve';
+        const approved = approvalFallback !== 'reject';
+        ws.send(JSON.stringify({
+          type: 'cf_agent_tool_approval',
+          toolCallId,
+          approved,
+          autoContinue: true,
+        }));
+        if (!approved) {
+          updateLifecycleState('error');
+          setError('当前策略拒绝高风险工具操作');
         }
-
-        // 已经在弹同一个请求时，不要重复 setState（避免 UI 反复闪烁/多次弹窗）。
-        const currentPending = pendingApprovalRef.current;
-        if (currentPending && currentPending.toolCallId === toolCallId) break;
-
-        const summaryText =
-          (typeof input.summary_text === 'string' && input.summary_text.trim())
-            ? input.summary_text
-            : '确认同步以下数据？';
-        setPendingApproval({ toolCallId, toolName, args: input, summaryText });
         break;
       }
       case 'tool-output-available': {
@@ -888,10 +975,12 @@ export function useAgentChat(sessionId = 'default') {
 
         if (WRITEBACK_TOOL_NAMES.has(toolName)) {
           if (preliminary) break;
+          updateLifecycleState('writeback_queued');
           if (isPlainObject(output)) {
             // Local-First output: { success, draft_id, payload, context_text, summary_text }
             if (output.success === false) {
               setError(typeof output.error === 'string' ? output.error : '写回草稿生成失败');
+              updateLifecycleState('error');
             } else if (typeof output.draft_id === 'string' && output.draft_id.trim()) {
               const draftId = output.draft_id.trim();
               const summaryText =
@@ -910,10 +999,12 @@ export function useAgentChat(sessionId = 'default') {
               });
 
               void commitWritebackDraft(draftId).then((summary) => {
+                updateLifecycleState('writeback_committing');
                 if (summary) {
                   lastWritebackCommitAtRef.current = Date.now();
                   setError(null);
                   setWritebackSummary(summary);
+                  updateLifecycleState('done');
                 }
               });
             } else if (isPlainObject(output.changes)) {
@@ -921,6 +1012,7 @@ export function useAgentChat(sessionId = 'default') {
               lastWritebackCommitAtRef.current = Date.now();
               setError(null);
               setWritebackSummary(output.changes as unknown as OrchestrateAutoWriteSummary);
+              updateLifecycleState('done');
             }
           }
         }
@@ -938,7 +1030,7 @@ export function useAgentChat(sessionId = 'default') {
       }
       case 'error': {
         // Stream error
-        setIsLoading(false);
+        updateLifecycleState('error');
         finalizeCurrentAssistant();
         const rawErrorText =
           (chunk.errorText as string) ||
@@ -966,7 +1058,7 @@ export function useAgentChat(sessionId = 'default') {
         // source-url, file, etc.
         break;
     }
-  }, [enqueueWritebackDraft, commitWritebackDraft]);
+  }, [enqueueWritebackDraft, commitWritebackDraft, updateLifecycleState]);
 
   const appendToCurrentAssistant = useCallback((text: string) => {
     const assistantId = currentAssistantIdRef.current;
@@ -1008,16 +1100,13 @@ export function useAgentChat(sessionId = 'default') {
       return false;
     }
 
-    if (pendingApprovalRef.current) {
-      setError('请先确认或拒绝当前档案同步请求');
-      return false;
-    }
-
     if (!text.trim()) return false;
 
     const allowProfileSync = options.allowProfileSync ?? true;
+    const executionProfile = options.executionProfile ?? 'build';
     const now = Date.now();
     const userMessageId = (options.userMessageId && options.userMessageId.trim()) ? options.userMessageId.trim() : `${now}-user`;
+    const clientTraceId = `trace-${now}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Reset state
     setError(null);
@@ -1029,7 +1118,7 @@ export function useAgentChat(sessionId = 'default') {
     if (options.appendUserMessage !== false) {
       setWritebackSummary(null);
     }
-    setIsLoading(true);
+    updateLifecycleState('sending');
 
     const userMessage: ChatMessage = {
       id: userMessageId,
@@ -1052,7 +1141,6 @@ export function useAgentChat(sessionId = 'default') {
     });
 
     // Build message in UIMessage format for AIChatAgent
-    // AIChatAgent's autoTransformMessages handles both legacy and UIMessage formats
     const msgId = userMessageId;
     const parts: Array<Record<string, string>> = [];
     if (imageDataUri) {
@@ -1067,6 +1155,7 @@ export function useAgentChat(sessionId = 'default') {
       text,
       imageDataUri,
       allowProfileSync,
+      executionProfile,
       userMessageId,
     };
 
@@ -1082,15 +1171,22 @@ export function useAgentChat(sessionId = 'default') {
             parts,
           }],
           allow_profile_sync: allowProfileSync,
+          execution_profile: executionProfile,
+          client_trace_id: clientTraceId,
+          session_id: sessionId,
         }),
       },
     }));
 
     return true;
-  }, []);
+  }, [sessionId, updateLifecycleState]);
 
   const sendMessage = useCallback((text: string, imageDataUri?: string) => {
-    void sendMessageInternal(text, imageDataUri, { appendUserMessage: true, allowProfileSync: true });
+    void sendMessageInternal(text, imageDataUri, {
+      appendUserMessage: true,
+      allowProfileSync: true,
+      executionProfile: 'build',
+    });
   }, [sendMessageInternal]);
 
   const retryLastMessageInternal = useCallback(() => {
@@ -1124,6 +1220,7 @@ export function useAgentChat(sessionId = 'default') {
     void sendMessageInternal(last.text, last.imageDataUri, {
       appendUserMessage: false,
       allowProfileSync,
+      executionProfile: last.executionProfile,
       userMessageId: last.userMessageId,
     });
   }, [connect, sendMessageInternal, writebackSummary]);
@@ -1134,43 +1231,6 @@ export function useAgentChat(sessionId = 'default') {
 
   const retryLastMessage = useCallback(() => {
     retryLastMessageInternalRef.current?.();
-  }, []);
-
-  // --- Tool approval ---
-
-  const approveToolCall = useCallback((toolCallId: string) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    toolApprovalDecisionRef.current.set(toolCallId, true);
-    // 防止 Map 无限增长（仅保留最近一段时间内的决定）
-    if (toolApprovalDecisionRef.current.size > 200) {
-      const firstKey = toolApprovalDecisionRef.current.keys().next().value as string | undefined;
-      if (firstKey) toolApprovalDecisionRef.current.delete(firstKey);
-    }
-    ws.send(JSON.stringify({
-      type: 'cf_agent_tool_approval',
-      toolCallId,
-      approved: true,
-      autoContinue: true,
-    }));
-    setPendingApproval(null);
-  }, []);
-
-  const rejectToolCall = useCallback((toolCallId: string) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    toolApprovalDecisionRef.current.set(toolCallId, false);
-    if (toolApprovalDecisionRef.current.size > 200) {
-      const firstKey = toolApprovalDecisionRef.current.keys().next().value as string | undefined;
-      if (firstKey) toolApprovalDecisionRef.current.delete(firstKey);
-    }
-    ws.send(JSON.stringify({
-      type: 'cf_agent_tool_approval',
-      toolCallId,
-      approved: false,
-      autoContinue: true,
-    }));
-    setPendingApproval(null);
   }, []);
 
   // --- Clear messages ---
@@ -1193,10 +1253,11 @@ export function useAgentChat(sessionId = 'default') {
     routingInfoRef.current = null;
     supplementsRef.current = [];
     setWritebackSummary(null);
-    setPendingApproval(null);
+    setPolicySnapshot(null);
     setStreamStatus('');
     setError(null);
-  }, []);
+    updateLifecycleState('idle');
+  }, [updateLifecycleState]);
 
   // --- Lifecycle ---
 
@@ -1216,18 +1277,17 @@ export function useAgentChat(sessionId = 'default') {
 
   return {
     messages,
+    lifecycleState,
     isLoading,
     isConnected,
     error,
     streamStatus,
     routingInfo,
     supplements,
+    policySnapshot,
     writebackSummary,
-    pendingApproval,
     sendMessage,
     retryLastMessage,
-    approveToolCall,
-    rejectToolCall,
     clearMessages,
   };
 }

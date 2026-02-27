@@ -5,7 +5,6 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as Haptics from 'expo-haptics';
 import Toast from 'react-native-toast-message';
 import { streamSingleRoleAgent } from '../services/agent-stream';
-import type { AIRole } from '../../shared/types';
 
 const MAX_IMAGE_DIMENSION = 1600;
 
@@ -31,14 +30,13 @@ export function parseAIJson<T>(raw: string): T | null {
 }
 
 interface UseImageAnalysisOptions {
-  role: AIRole;
   buildPrompt: () => string;
   onResult: (rawText: string) => void;
   allowProfileSync?: boolean;
 }
 
 export function useImageAnalysis(options: UseImageAnalysisOptions) {
-  const { role, buildPrompt, onResult, allowProfileSync = false } = options;
+  const { buildPrompt, onResult, allowProfileSync = false } = options;
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisText, setAnalysisText] = useState('');
   const analyzingRef = useRef(false);
@@ -76,7 +74,6 @@ export function useImageAnalysis(options: UseImageAnalysisOptions) {
       const rawText = await new Promise<string>((resolve, reject) => {
         let merged = '';
         void streamSingleRoleAgent({
-          role,
           message: prompt,
           imageDataUri,
           allowProfileSync,
@@ -97,7 +94,7 @@ export function useImageAnalysis(options: UseImageAnalysisOptions) {
       setAnalyzing(false);
       analyzingRef.current = false;
     }
-  }, [role, buildPrompt, onResult, allowProfileSync]);
+  }, [buildPrompt, onResult, allowProfileSync]);
 
   const pickAndAnalyze = useCallback(() => {
     if (analyzingRef.current) return;

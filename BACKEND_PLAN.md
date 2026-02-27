@@ -461,3 +461,27 @@ backend/src/
 ├── index.ts                      # Hono 入口
 └── types.ts                      # 全局类型
 ```
+## Agent治理双轨发布手册（2026-02-27）
+
+### 配置开关
+
+- `AGENT_FLOW_MODE=dual|governed`
+- `AGENT_APPROVAL_FALLBACK=auto_approve|reject`
+- `AGENT_EXECUTION_PROFILE_DEFAULT=build|plan`
+
+### 分阶段发布
+
+1. 阶段1（双轨并行）：`AGENT_FLOW_MODE=dual`
+2. 阶段2（治理接管）：`AGENT_FLOW_MODE=governed`
+
+### 切换门槛
+
+- 连续7天 `npm run eval:agent` 通过率 ≥ 95%
+- 写回失败率不高于基线
+- 重复写回率为 0
+
+### 回滚策略
+
+1. 立即切回 `AGENT_FLOW_MODE=dual`
+2. 保留 `agent_runtime_events` / `ai_writeback_audits` 数据用于复盘
+3. 不执行破坏性数据清理

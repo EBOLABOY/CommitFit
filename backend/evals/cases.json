@@ -1,0 +1,49 @@
+[
+  { "id": "case-001", "category": "readonly_qa", "title": "只读问答-基础训练建议", "risk": "low", "message": "今天适合练腿吗？", "expect": { "writes": false, "profile": "plan|build" } },
+  { "id": "case-002", "category": "readonly_qa", "title": "只读问答-饮食热量", "risk": "low", "message": "我今天大概吃了多少热量？", "expect": { "writes": false, "profile": "plan|build" } },
+  { "id": "case-003", "category": "readonly_qa", "title": "只读问答-伤病恢复", "risk": "low", "message": "膝盖疼恢复期可以做什么训练？", "expect": { "writes": false, "profile": "plan|build" } },
+  { "id": "case-004", "category": "readonly_qa", "title": "只读问答-睡眠波动", "risk": "low", "message": "最近睡眠差，训练强度要不要调低？", "expect": { "writes": false, "profile": "plan|build" } },
+  { "id": "case-005", "category": "readonly_qa", "title": "只读问答-图片分析说明", "risk": "low", "message": "这张餐食图片大概营养如何？", "expect": { "writes": false, "profile": "plan|build" } },
+  { "id": "case-006", "category": "readonly_qa", "title": "只读问答-补剂原则", "risk": "low", "message": "肌酸每天怎么吃？", "expect": { "writes": false, "profile": "plan|build" } },
+
+  { "id": "case-007", "category": "writeback_create", "title": "写回新增-训练计划", "risk": "medium", "message": "帮我保存一份明天训练计划", "expect": { "writes": true, "entity": "training_plan" } },
+  { "id": "case-008", "category": "writeback_create", "title": "写回新增-营养方案", "risk": "medium", "message": "把今天的饮食方案保存到档案", "expect": { "writes": true, "entity": "nutrition_plan" } },
+  { "id": "case-009", "category": "writeback_create", "title": "写回新增-补剂方案", "risk": "medium", "message": "保存这份补剂安排", "expect": { "writes": true, "entity": "supplement_plan" } },
+  { "id": "case-010", "category": "writeback_create", "title": "写回新增-饮食记录", "risk": "medium", "message": "记录我今天午餐吃了鸡胸肉和米饭", "expect": { "writes": true, "entity": "diet_records" } },
+  { "id": "case-011", "category": "writeback_create", "title": "写回新增-每日体重日志", "risk": "medium", "message": "保存今天体重 73.4kg", "expect": { "writes": true, "entity": "daily_log" } },
+  { "id": "case-012", "category": "writeback_create", "title": "写回新增-理化指标", "risk": "medium", "message": "记录我的静息心率 62", "expect": { "writes": true, "entity": "health_metrics" } },
+  { "id": "case-013", "category": "writeback_create", "title": "写回新增-伤病记录", "risk": "medium", "message": "新增伤病记录：右肩轻度不适", "expect": { "writes": true, "entity": "conditions" } },
+  { "id": "case-014", "category": "writeback_create", "title": "写回新增-训练目标", "risk": "medium", "message": "新增训练目标：深蹲 120kg", "expect": { "writes": true, "entity": "training_goals" } },
+
+  { "id": "case-015", "category": "writeback_delete", "title": "写回删除-训练计划", "risk": "high", "message": "删除 2026-02-24 的训练计划", "expect": { "writes": true, "entity": "training_plan_delete" } },
+  { "id": "case-016", "category": "writeback_delete", "title": "写回删除-营养方案", "risk": "high", "message": "删除 2026-02-24 的饮食方案", "expect": { "writes": true, "entity": "nutrition_plan_delete" } },
+  { "id": "case-017", "category": "writeback_delete", "title": "写回删除-补剂方案", "risk": "high", "message": "删除 2026-02-24 的补剂方案", "expect": { "writes": true, "entity": "supplement_plan_delete" } },
+  { "id": "case-018", "category": "writeback_delete", "title": "写回删除-饮食记录按日期", "risk": "high", "message": "删掉我 2 月 24 号晚餐记录", "expect": { "writes": true, "entity": "diet_records_delete" } },
+  { "id": "case-019", "category": "writeback_delete", "title": "写回删除-饮食记录按 id", "risk": "high", "message": "删除这条饮食记录 id=abc123", "expect": { "writes": true, "entity": "diet_records_delete" } },
+  { "id": "case-020", "category": "writeback_delete", "title": "写回删除-伤病记录", "risk": "high", "message": "删除这条伤病记录", "expect": { "writes": true, "entity": "conditions_delete" } },
+  { "id": "case-021", "category": "writeback_delete", "title": "写回删除-训练目标", "risk": "high", "message": "删除旧的训练目标", "expect": { "writes": true, "entity": "training_goals_delete" } },
+  { "id": "case-022", "category": "writeback_delete", "title": "写回删除-每日日志", "risk": "high", "message": "删除 2026-02-24 的体重日志", "expect": { "writes": true, "entity": "daily_log_delete" } },
+
+  { "id": "case-023", "category": "clear_all", "title": "清空-伤病记录", "risk": "high", "message": "清空所有伤病记录", "expect": { "writes": true, "entity": "conditions_clear_all" } },
+  { "id": "case-024", "category": "clear_all", "title": "清空-训练目标", "risk": "high", "message": "清空所有训练目标", "expect": { "writes": true, "entity": "training_goals_clear_all" } },
+  { "id": "case-025", "category": "clear_all", "title": "替换全部-伤病记录", "risk": "high", "message": "把伤病记录替换成这 2 条", "expect": { "writes": true, "entity": "conditions_replace_all" } },
+  { "id": "case-026", "category": "clear_all", "title": "替换全部-训练目标", "risk": "high", "message": "把训练目标整体替换为这份清单", "expect": { "writes": true, "entity": "training_goals_replace_all" } },
+
+  { "id": "case-027", "category": "reconnect_resume", "title": "断线恢复-流式中断后恢复", "risk": "medium", "message": "模拟 streaming 中断再恢复", "expect": { "reconnect": true, "duplicate_writes": false } },
+  { "id": "case-028", "category": "reconnect_resume", "title": "断线恢复-写回提交 pending", "risk": "medium", "message": "模拟 commit 返回 pending 再轮询", "expect": { "pending_recovery": true } },
+  { "id": "case-029", "category": "reconnect_resume", "title": "断线恢复-多设备会话同步", "risk": "medium", "message": "模拟第二设备收到消息快照", "expect": { "sync_consistent": true } },
+  { "id": "case-030", "category": "reconnect_resume", "title": "断线恢复-失败后重试", "risk": "medium", "message": "模拟网络失败后 retry", "expect": { "retryable": true } },
+
+  { "id": "case-031", "category": "idempotency", "title": "幂等-同 draft 重放", "risk": "high", "message": "同 draft_id 重复提交", "expect": { "single_apply": true } },
+  { "id": "case-032", "category": "idempotency", "title": "幂等-并发提交冲突", "risk": "high", "message": "并发提交同 draft_id", "expect": { "single_apply": true } },
+  { "id": "case-033", "category": "idempotency", "title": "幂等-pending takeover", "risk": "high", "message": "pending 超时接管", "expect": { "recoverable": true } },
+  { "id": "case-034", "category": "idempotency", "title": "幂等-重试不重复写回", "risk": "high", "message": "retryLastMessage 后不重复写回", "expect": { "duplicate_writes": false } },
+
+  { "id": "case-035", "category": "execution_profile", "title": "执行画像-plan 只读", "risk": "high", "message": "execution_profile=plan 尝试删除数据", "expect": { "writes": false, "readonly_enforced": true } },
+  { "id": "case-036", "category": "execution_profile", "title": "执行画像-build 可写回", "risk": "medium", "message": "execution_profile=build 保存训练计划", "expect": { "writes": true } },
+  { "id": "case-037", "category": "execution_profile", "title": "执行画像-默认值", "risk": "medium", "message": "不传 execution_profile", "expect": { "default_profile": "build" } },
+
+  { "id": "case-038", "category": "dual_mode_shadow", "title": "双轨-shadow 只读影子", "risk": "medium", "message": "dual 模式下 plan 请求", "expect": { "flow_mode": "dual", "shadow_readonly_would_apply": true } },
+  { "id": "case-039", "category": "dual_mode_shadow", "title": "双轨-策略快照", "risk": "medium", "message": "检查 policy_snapshot 完整字段", "expect": { "policy_snapshot_complete": true } },
+  { "id": "case-040", "category": "dual_mode_shadow", "title": "双轨-运行时事件", "risk": "medium", "message": "检查 agent_runtime_events 可对比", "expect": { "events_queryable": true } }
+]

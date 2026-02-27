@@ -224,7 +224,6 @@ export default function DietRecordScreen() {
       const aiRawText = await new Promise<string>((resolve, reject) => {
         let merged = '';
         void streamSingleRoleAgent({
-          role: 'nutritionist',
           message: prompt,
           imageDataUri,
           onChunk: (chunk) => {
