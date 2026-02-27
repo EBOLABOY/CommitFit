@@ -9,7 +9,7 @@ import { useProfileStore } from '../../stores/profile';
 import { Card, Button, EmptyState, Skeleton } from '../../components/ui';
 import { Spacing, Radius, FontSize } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import type { NutritionPlan } from '../../../shared/types';
+import type { NutritionPlan } from '@shared/types';
 import {
   isSupplementPlan,
   parseStructuredSupplementPlan,

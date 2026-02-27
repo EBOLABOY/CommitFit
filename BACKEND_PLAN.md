@@ -485,3 +485,22 @@ backend/src/
 1. 立即切回 `AGENT_FLOW_MODE=dual`
 2. 保留 `agent_runtime_events` / `ai_writeback_audits` 数据用于复盘
 3. 不执行破坏性数据清理
+
+## 移动端 AI 双通道运行手册（2026-02-27）
+
+### 运行原则
+
+1. 默认主链路：Workers AI（后端统一编排）。
+2. 移动端自定义代理：仅当客户端配置完整时启用直连。
+3. 直连模式仍复用后端业务 API（query/writeback），确保数据幂等与审计不变。
+
+### 新增接口
+
+- `GET /api/agent/runtime-context?role=...&session_id=...`
+- 返回：`system_prompt`、`context_text`、`writeback_mode`、`execution_defaults`
+
+### 故障定位
+
+1. 若移动端显示“已回退 Workers AI”，优先检查自定义配置完整性（base_url / worker_model / planner_model / api_key）。
+2. 若自定义代理返回 401/403/5xx，客户端会停留在 custom 模式并给出明确错误，不会污染 Outbox。
+3. 若出现写回异常，优先检查 `/api/writeback/commit` 与 `ai_writeback_audits`。

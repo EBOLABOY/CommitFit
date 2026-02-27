@@ -34,12 +34,13 @@ import { api, getToken } from '../../services/api';
 import { AI_ROLES, Spacing, Radius, FontSize, API_BASE_URL, Shadows, HitSlop } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
 import { useAgentChat } from '../../hooks/useAgentChat';
+import { useAIConfigStore } from '../../stores/ai-config';
 import type {
   OrchestrateAutoWriteSummary,
   SSERoutingEvent,
   SSESupplementEvent,
   AIRole,
-} from '../../../shared/types';
+} from '@shared/types';
 
 const MAX_IMAGE_DIMENSION = 1600;
 const INLINE_THRESHOLD = 500 * 1024;
@@ -84,6 +85,7 @@ function PulsingDot({ color, delay: delayMs }: { color: string; delay: number })
 export default function AIChatScreen() {
   const Colors = useThemeColor();
   const insets = useSafeAreaInsets();
+  const resolvedAIConfig = useAIConfigStore((s) => s.resolved);
 
   // WebSocket-based chat
   const {
@@ -352,6 +354,16 @@ export default function AIChatScreen() {
     }
   }, [lifecycleState]);
 
+  const providerHint = useMemo(() => {
+    const provider = policySnapshot?.llm_provider
+      || (resolvedAIConfig.effective_provider === 'custom' ? 'custom_direct' : 'workers_ai');
+    const model = policySnapshot?.llm_model
+      || (resolvedAIConfig.effective_provider === 'custom'
+        ? `${resolvedAIConfig.custom_primary_model} -> ${resolvedAIConfig.custom_fallback_model}`
+        : 'Workers 默认模型');
+    return `Provider:${provider} · Model:${model}`;
+  }, [policySnapshot?.llm_model, policySnapshot?.llm_provider, resolvedAIConfig]);
+
   const handleClear = () => {
     Alert.alert('清空对话', '确定要清空所有对话记录吗？', [
       { text: '取消', style: 'cancel' },
@@ -410,12 +422,13 @@ export default function AIChatScreen() {
               <View style={[styles.connectionDot, { backgroundColor: isConnected ? Colors.success : Colors.danger }]} />
               <View>
                 <Text style={[styles.chatHeaderTitle, { color: Colors.text }]}>AI 咨询</Text>
-                {(lifecycleHint || policySnapshot) && (
+                {(lifecycleHint || policySnapshot || providerHint) && (
                   <Text style={[styles.chatHeaderMeta, { color: Colors.textSecondary }]}>
                     {[
                       lifecycleHint || null,
                       policySnapshot ? `模式:${policySnapshot.flow_mode}` : null,
                       policySnapshot ? `执行:${policySnapshot.effective_execution_profile}` : null,
+                      providerHint,
                     ].filter(Boolean).join(' · ')}
                   </Text>
                 )}
@@ -551,6 +564,15 @@ export default function AIChatScreen() {
           >
             <Text style={[styles.errorRetryButtonText, { color: Colors.danger }]}>重试</Text>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {resolvedAIConfig.provider === 'custom' && resolvedAIConfig.effective_provider !== 'custom' && (
+        <View style={[styles.fallbackBanner, { backgroundColor: Colors.warningLight, borderColor: Colors.warning + '55' }]}>
+          <Ionicons name="information-circle-outline" size={16} color={Colors.warning} />
+          <Text style={[styles.fallbackBannerText, { color: Colors.warning }]} numberOfLines={2}>
+            自定义代理配置不完整，当前已自动回退到 Workers AI。
+          </Text>
         </View>
       )}
 
@@ -783,6 +805,19 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.xs,
   },
   writebackBannerText: { fontSize: FontSize.xs, flex: 1 },
+
+  fallbackBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+  },
+  fallbackBannerText: { flex: 1, fontSize: FontSize.xs },
 
   // Image preview
   previewBar: { paddingHorizontal: Spacing.md, paddingTop: Spacing.sm, borderTopWidth: 1 },

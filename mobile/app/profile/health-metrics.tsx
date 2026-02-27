@@ -18,7 +18,7 @@ import { useImageAnalysis, parseAIJson } from '../../hooks/useImageAnalysis';
 import { Card, Button, Badge, EmptyState, Skeleton, FormField, OptionPicker, ThemedInput } from '../../components/ui';
 import { Spacing, Radius, FontSize, METRIC_TYPE_LABELS, HitSlop } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import type { HealthMetric, MetricType } from '../../../shared/types';
+import type { HealthMetric, MetricType } from '@shared/types';
 
 export default function HealthMetricsScreen() {
   const Colors = useThemeColor();

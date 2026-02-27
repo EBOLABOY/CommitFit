@@ -5,7 +5,7 @@ import type {
   AgentFlowMode,
   AgentLifecycleState,
   OrchestrateAutoWriteSummary,
-} from '../../../shared/types';
+} from '@shared/types';
 
 export interface AgentHistoryMessage {
   role: 'user' | 'assistant';

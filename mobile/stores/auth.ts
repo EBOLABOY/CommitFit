@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { api, setToken, clearToken } from '../services/api';
+import { useAIConfigStore } from './ai-config';
+import { clearCustomAIKey } from '../services/ai-config-secure';
 
 interface User {
   id: string;
@@ -51,6 +53,15 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: async () => {
+    const currentUserId = useAuthStore.getState().user?.id;
+    if (currentUserId) {
+      try {
+        await clearCustomAIKey(currentUserId);
+      } catch {
+        // ignore secure-store cleanup failure
+      }
+    }
+    useAIConfigStore.getState().setCustomApiKeyConfigured(false);
     await clearToken();
     set({ user: null, isAuthenticated: false });
   },

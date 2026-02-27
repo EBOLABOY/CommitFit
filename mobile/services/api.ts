@@ -1,14 +1,16 @@
 import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../constants';
 import type {
+  AgentRuntimeContextResponse,
   UpdateProfileRequest,
   CreateHealthMetricRequest,
   CreateConditionRequest,
   CreateTrainingGoalRequest,
   CreateDietRecordRequest,
   UpsertDailyLogRequest,
+  WritebackRequestMeta,
   WritebackCommitResponseData,
-} from '../../shared/types';
+} from '@shared/types';
 
 let authToken: string | null = null;
 
@@ -195,6 +197,20 @@ export const api = {
     request('/api/daily-logs', { method: 'PUT', body: JSON.stringify(data) }),
 
   // Local-First writeback commit (idempotent)
-  commitWriteback: (data: { draft_id: string; payload: Record<string, unknown>; context_text?: string }) =>
+  commitWriteback: (data: {
+    draft_id: string;
+    payload: Record<string, unknown>;
+    context_text?: string;
+    request_meta?: WritebackRequestMeta;
+  }) =>
     request<WritebackCommitResponseData>('/api/writeback/commit', { method: 'POST', body: JSON.stringify(data) }),
+
+  // Agent runtime context (for custom direct runtime)
+  getAgentRuntimeContext: (role?: string, sessionId?: string) =>
+    request<AgentRuntimeContextResponse>(
+      `/api/agent/runtime-context${role || sessionId ? `?${[
+        role ? `role=${encodeURIComponent(role)}` : '',
+        sessionId ? `session_id=${encodeURIComponent(sessionId)}` : '',
+      ].filter(Boolean).join('&')}` : ''}`
+    ),
 };

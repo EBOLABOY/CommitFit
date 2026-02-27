@@ -4,17 +4,25 @@ import type { Bindings, Variables } from '../types';
 import { authMiddleware } from '../middleware/auth';
 import { applyAutoWriteback, recordWritebackAudit } from '../services/orchestrator';
 import { syncProfileToolSchema } from '../agents/sync-profile-tool';
+import type { WritebackRequestMeta } from '@shared/types';
 
 export const writebackRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 writebackRoutes.use('*', authMiddleware);
 
 const writebackPayloadSchema = syncProfileToolSchema.omit({ summary_text: true });
+const requestMetaSchema = z.object({
+  client_request_at: z.string().max(64).optional(),
+  client_timezone: z.string().max(64).optional(),
+  client_local_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  client_utc_offset_minutes: z.number().int().min(-840).max(840).optional(),
+});
 
 const commitSchema = z.object({
   draft_id: z.string().min(8).max(128),
   payload: writebackPayloadSchema.optional().nullable(),
   context_text: z.string().max(20_000).optional().nullable(),
+  request_meta: requestMetaSchema.optional().nullable(),
 });
 
 type CommitRow = {
@@ -51,6 +59,7 @@ writebackRoutes.post('/commit', async (c) => {
 
   const draftId = parsed.data.draft_id;
   const contextText = typeof parsed.data.context_text === 'string' ? parsed.data.context_text : '';
+  const requestMeta = (parsed.data.request_meta ?? undefined) as WritebackRequestMeta | undefined;
   const payload = (parsed.data.payload ?? {}) as unknown as Record<string, unknown>;
   if (Object.keys(payload).length === 0) {
     return c.json({ success: false, error: '本次同步请求未包含明确可写回的目标模块，请在对话中明确说明要修改哪些信息。' }, 400);
@@ -114,7 +123,10 @@ writebackRoutes.post('/commit', async (c) => {
       }
 
       try {
-        const summary = await applyAutoWriteback(c.env.DB, userId, payloadFromDb as any, { contextText });
+        const summary = await applyAutoWriteback(c.env.DB, userId, payloadFromDb as any, {
+          contextText,
+          requestMeta,
+        });
         const summaryJson = JSON.stringify(summary);
 
         await c.env.DB.prepare(
@@ -179,7 +191,10 @@ writebackRoutes.post('/commit', async (c) => {
   }
 
   try {
-    const summary = await applyAutoWriteback(c.env.DB, userId, payload, { contextText });
+    const summary = await applyAutoWriteback(c.env.DB, userId, payload, {
+      contextText,
+      requestMeta,
+    });
     const summaryJson = JSON.stringify(summary);
 
     await c.env.DB.prepare(

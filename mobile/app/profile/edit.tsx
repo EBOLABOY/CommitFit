@@ -25,7 +25,7 @@ import { ProfileData } from '../../stores/profile';
 import { Button, Card, LoadingScreen } from '../../components/ui';
 import { API_BASE_URL, Spacing, Radius, FontSize, GENDER_LABELS, Gradients, Shadows } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import type { UpdateProfileRequest, Gender } from '../../../shared/types';
+import type { UpdateProfileRequest, Gender } from '@shared/types';
 
 const MAX_AVATAR_DIMENSION = 640;
 

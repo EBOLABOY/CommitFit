@@ -319,6 +319,14 @@ export default function ProfileScreen() {
       <SectionHeader title="账号设置" />
       <Card style={styles.menuCard}>
         <ListItem
+          icon="sparkles"
+          iconColor={Colors.primary}
+          title="AI 配置"
+          subtitle="切换 Workers 或自定义代理"
+          onPress={() => router.push('/profile/ai-settings')}
+        />
+        <View style={[styles.divider, { backgroundColor: Colors.borderLight }]} />
+        <ListItem
           icon="lock-closed"
           iconColor={Colors.textSecondary}
           title="修改密码"

@@ -29,6 +29,13 @@ export interface OrchestrateAutoWriteSummary {
   daily_log_deleted?: boolean;
 }
 
+export interface WritebackRequestMeta {
+  client_request_at?: string;
+  client_timezone?: string;
+  client_local_date?: string;
+  client_utc_offset_minutes?: number;
+}
+
 type Gender = 'male' | 'female';
 type Severity = 'mild' | 'moderate' | 'severe';
 type ConditionStatus = 'active' | 'recovered';
@@ -172,8 +179,63 @@ const VALID_SLEEP_QUALITIES: SleepQuality[] = ['good', 'fair', 'poor'];
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
-function asDateOnly(input: string | undefined): string {
+function toUtcDateOnly(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function formatDateInTimeZone(date: Date, timeZone: string): string | null {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((p) => p.type === 'year')?.value;
+    const month = parts.find((p) => p.type === 'month')?.value;
+    const day = parts.find((p) => p.type === 'day')?.value;
+    if (!year || !month || !day) return null;
+    const dateOnly = `${year}-${month}-${day}`;
+    return DATE_ONLY_REGEX.test(dateOnly) ? dateOnly : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveRequestDateAnchor(meta: WritebackRequestMeta | null | undefined): string | null {
+  if (!meta || typeof meta !== 'object') return null;
+
+  if (typeof meta.client_local_date === 'string' && DATE_ONLY_REGEX.test(meta.client_local_date)) {
+    return meta.client_local_date;
+  }
+
+  if (typeof meta.client_request_at !== 'string' || !isISODateString(meta.client_request_at)) {
+    return null;
+  }
+
+  const requestDate = new Date(meta.client_request_at);
+  if (Number.isNaN(requestDate.getTime())) return null;
+
+  if (typeof meta.client_timezone === 'string' && meta.client_timezone.trim()) {
+    const byTimeZone = formatDateInTimeZone(requestDate, meta.client_timezone.trim());
+    if (byTimeZone) return byTimeZone;
+  }
+
+  if (typeof meta.client_utc_offset_minutes === 'number' && Number.isFinite(meta.client_utc_offset_minutes)) {
+    const offsetMinutes = Math.trunc(meta.client_utc_offset_minutes);
+    if (offsetMinutes >= -840 && offsetMinutes <= 840) {
+      const shifted = new Date(requestDate.getTime() + offsetMinutes * 60_000);
+      return toUtcDateOnly(shifted);
+    }
+  }
+
+  return toUtcDateOnly(requestDate);
+}
+
+function asDateOnly(input: string | undefined, fallbackDate?: string | null): string {
   if (input && DATE_ONLY_REGEX.test(input)) return input;
+  if (fallbackDate && DATE_ONLY_REGEX.test(fallbackDate)) return fallbackDate;
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -192,7 +254,7 @@ function getWeekMonday(dateOnly: string): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-function inferTrainingPlanDate(rawPlanDate: unknown, sourceText: string): string {
+function inferTrainingPlanDate(rawPlanDate: unknown, sourceText: string, requestDateAnchor?: string | null): string {
   if (typeof rawPlanDate === 'string' && DATE_ONLY_REGEX.test(rawPlanDate)) {
     return rawPlanDate;
   }
@@ -202,7 +264,7 @@ function inferTrainingPlanDate(rawPlanDate: unknown, sourceText: string): string
     return explicitDate;
   }
 
-  const today = asDateOnly(undefined);
+  const today = asDateOnly(undefined, requestDateAnchor);
   if (/(后天)/.test(sourceText)) return addDays(today, 2);
   if (/(明天|明日)/.test(sourceText)) return addDays(today, 1);
   if (/(本周|一周|7天|七天|周计划)/.test(sourceText)) return getWeekMonday(today);
@@ -211,7 +273,7 @@ function inferTrainingPlanDate(rawPlanDate: unknown, sourceText: string): string
   return today;
 }
 
-function inferRecordDate(rawDate: unknown, sourceText: string): string {
+function inferRecordDate(rawDate: unknown, sourceText: string, requestDateAnchor?: string | null): string {
   if (typeof rawDate === 'string' && DATE_ONLY_REGEX.test(rawDate)) {
     return rawDate;
   }
@@ -220,7 +282,7 @@ function inferRecordDate(rawDate: unknown, sourceText: string): string {
     return explicitDate;
   }
 
-  const today = asDateOnly(undefined);
+  const today = asDateOnly(undefined, requestDateAnchor);
   if (/(昨天|昨日)/.test(sourceText)) return addDays(today, -1);
   if (/(前天)/.test(sourceText)) return addDays(today, -2);
   if (/(后天)/.test(sourceText)) return addDays(today, 2);
@@ -714,14 +776,15 @@ async function applyTrainingPlan(
   db: D1Database,
   userId: string,
   plan: ExtractedTrainingPlan | null | undefined,
-  contextText?: string
+  contextText?: string,
+  requestDateAnchor?: string | null
 ): Promise<boolean> {
   if (!plan || typeof plan !== 'object') return false;
 
   const content = normalizeString(plan.content, 12000);
   if (!content || content.length < 12) return false;
 
-  const planDate = inferTrainingPlanDate(plan.plan_date, `${contextText || ''}\n${content}`);
+  const planDate = inferTrainingPlanDate(plan.plan_date, `${contextText || ''}\n${content}`, requestDateAnchor);
   const notes = plan.notes == null ? null : normalizeString(plan.notes, 500);
   const completed = plan.completed === true || plan.completed === 1 ? 1 : 0;
 
@@ -744,9 +807,10 @@ async function deleteTrainingPlanByDate(
   db: D1Database,
   userId: string,
   rawDate: unknown,
-  contextText?: string
+  contextText?: string,
+  requestDateAnchor?: string | null
 ): Promise<boolean> {
-  const planDate = inferTrainingPlanDate(rawDate, contextText || '');
+  const planDate = inferTrainingPlanDate(rawDate, contextText || '', requestDateAnchor);
   const res = await db.prepare('DELETE FROM training_plans WHERE user_id = ? AND plan_date = ?')
     .bind(userId, planDate)
     .run();
@@ -758,9 +822,10 @@ async function deleteNutritionPlanByDate(
   userId: string,
   rawDate: unknown,
   type: 'nutrition' | 'supplement',
-  contextText?: string
+  contextText?: string,
+  requestDateAnchor?: string | null
 ): Promise<boolean> {
-  const planDate = inferTrainingPlanDate(rawDate, contextText || '');
+  const planDate = inferTrainingPlanDate(rawDate, contextText || '', requestDateAnchor);
   const res = type === 'supplement'
     ? await db.prepare(
       "DELETE FROM nutrition_plans WHERE user_id = ? AND plan_date = ? AND content LIKE '【补剂方案】%'"
@@ -779,7 +844,8 @@ async function applyDietRecords(
   db: D1Database,
   userId: string,
   rawRecords: ExtractedDietRecord[] | undefined,
-  contextText?: string
+  contextText?: string,
+  requestDateAnchor?: string | null
 ): Promise<number> {
   if (!Array.isArray(rawRecords) || rawRecords.length === 0) return 0;
 
@@ -797,7 +863,7 @@ async function applyDietRecords(
 
     const foodDescription = normalizeString(item.food_description, 1000);
     if (!foodDescription) continue;
-    const recordDate = inferRecordDate(item.record_date, `${contextText || ''}\n${foodDescription}`);
+    const recordDate = inferRecordDate(item.record_date, `${contextText || ''}\n${foodDescription}`, requestDateAnchor);
 
     const dedupeKey = `${mealType}|${recordDate}`;
     if (seen.has(dedupeKey)) continue;
@@ -844,7 +910,8 @@ async function deleteDietRecords(
   db: D1Database,
   userId: string,
   deletes: ExtractedDietRecordDelete[] | undefined,
-  contextText?: string
+  contextText?: string,
+  requestDateAnchor?: string | null
 ): Promise<number> {
   if (!Array.isArray(deletes) || deletes.length === 0) return 0;
 
@@ -870,7 +937,7 @@ async function deleteDietRecords(
         : null;
     if (!mealType) continue;
 
-    const recordDate = inferRecordDate(item?.record_date, contextText || '');
+    const recordDate = inferRecordDate(item?.record_date, contextText || '', requestDateAnchor);
     const dedupeKey = `${mealType}|${recordDate}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
@@ -889,12 +956,13 @@ async function applyNutritionPlan(
   db: D1Database,
   userId: string,
   plan: ExtractedPlan | null | undefined,
-  type: 'nutrition' | 'supplement'
+  type: 'nutrition' | 'supplement',
+  requestDateAnchor?: string | null
 ): Promise<boolean> {
   if (!plan || typeof plan !== 'object') return false;
   const contentRaw = normalizeString(plan.content, 6000);
   if (!contentRaw || contentRaw.length < 12) return false;
-  const planDate = asDateOnly(plan.plan_date);
+  const planDate = asDateOnly(plan.plan_date, requestDateAnchor);
   const content = type === 'supplement' && !contentRaw.startsWith('【补剂方案】')
     ? `【补剂方案】\n${contentRaw}`
     : contentRaw;
@@ -927,14 +995,15 @@ async function applyNutritionPlan(
 async function applyDailyLog(
   db: D1Database,
   userId: string,
-  dailyLog: ExtractedDailyLog | null | undefined
+  dailyLog: ExtractedDailyLog | null | undefined,
+  requestDateAnchor?: string | null
 ): Promise<boolean> {
   if (!dailyLog || typeof dailyLog !== 'object') return false;
 
   const logDate =
     typeof dailyLog.log_date === 'string' && DATE_ONLY_REGEX.test(dailyLog.log_date)
       ? dailyLog.log_date
-      : asDateOnly(undefined);
+      : asDateOnly(undefined, requestDateAnchor);
 
   const weight =
     typeof dailyLog.weight === 'number' &&
@@ -984,9 +1053,10 @@ async function deleteDailyLogByDate(
   db: D1Database,
   userId: string,
   rawDate: unknown,
-  contextText?: string
+  contextText?: string,
+  requestDateAnchor?: string | null
 ): Promise<boolean> {
-  const logDate = inferRecordDate(rawDate, contextText || '');
+  const logDate = inferRecordDate(rawDate, contextText || '', requestDateAnchor);
   const res = await db.prepare('DELETE FROM daily_logs WHERE user_id = ? AND log_date = ?')
     .bind(userId, logDate)
     .run();
@@ -997,7 +1067,7 @@ export async function applyAutoWriteback(
   db: D1Database,
   userId: string,
   extracted: ExtractedWritebackPayload | null,
-  options?: { contextText?: string | null }
+  options?: { contextText?: string | null; requestMeta?: WritebackRequestMeta | null }
 ): Promise<OrchestrateAutoWriteSummary> {
   const summary: OrchestrateAutoWriteSummary = {
     profile_updated: false,
@@ -1026,6 +1096,7 @@ export async function applyAutoWriteback(
   summary.user_updated = await applyUserPatch(db, userId, extracted.user);
   summary.profile_updated = await applyProfilePatch(db, userId, extracted.profile);
   const contextText = typeof options?.contextText === 'string' ? options.contextText : '';
+  const requestDateAnchor = resolveRequestDateAnchor(options?.requestMeta);
 
   // --- Conditions (伤病) ---
   const conditionsMode = normalizeConditionsMode(extracted.conditions_mode) ?? 'upsert';
@@ -1060,29 +1131,55 @@ export async function applyAutoWriteback(
 
   // --- Training plan (训练计划/记录) ---
   if (extracted.training_plan_delete_date) {
-    summary.training_plan_deleted = await deleteTrainingPlanByDate(db, userId, extracted.training_plan_delete_date, contextText);
+    summary.training_plan_deleted = await deleteTrainingPlanByDate(
+      db,
+      userId,
+      extracted.training_plan_delete_date,
+      contextText,
+      requestDateAnchor
+    );
   }
-  summary.training_plan_created = await applyTrainingPlan(db, userId, extracted.training_plan, contextText);
+  summary.training_plan_created = await applyTrainingPlan(db, userId, extracted.training_plan, contextText, requestDateAnchor);
 
   // --- Nutrition plans (饮食/补剂方案) ---
   if (extracted.nutrition_plan_delete_date) {
-    summary.nutrition_plan_deleted = await deleteNutritionPlanByDate(db, userId, extracted.nutrition_plan_delete_date, 'nutrition', contextText);
+    summary.nutrition_plan_deleted = await deleteNutritionPlanByDate(
+      db,
+      userId,
+      extracted.nutrition_plan_delete_date,
+      'nutrition',
+      contextText,
+      requestDateAnchor
+    );
   }
   if (extracted.supplement_plan_delete_date) {
-    summary.supplement_plan_deleted = await deleteNutritionPlanByDate(db, userId, extracted.supplement_plan_delete_date, 'supplement', contextText);
+    summary.supplement_plan_deleted = await deleteNutritionPlanByDate(
+      db,
+      userId,
+      extracted.supplement_plan_delete_date,
+      'supplement',
+      contextText,
+      requestDateAnchor
+    );
   }
-  summary.nutrition_plan_created = await applyNutritionPlan(db, userId, extracted.nutrition_plan, 'nutrition');
-  summary.supplement_plan_created = await applyNutritionPlan(db, userId, extracted.supplement_plan, 'supplement');
+  summary.nutrition_plan_created = await applyNutritionPlan(db, userId, extracted.nutrition_plan, 'nutrition', requestDateAnchor);
+  summary.supplement_plan_created = await applyNutritionPlan(db, userId, extracted.supplement_plan, 'supplement', requestDateAnchor);
 
   // --- Diet records (饮食记录) ---
-  summary.diet_records_deleted = await deleteDietRecords(db, userId, extracted.diet_records_delete, contextText);
-  summary.diet_records_created = await applyDietRecords(db, userId, extracted.diet_records, contextText);
+  summary.diet_records_deleted = await deleteDietRecords(db, userId, extracted.diet_records_delete, contextText, requestDateAnchor);
+  summary.diet_records_created = await applyDietRecords(db, userId, extracted.diet_records, contextText, requestDateAnchor);
 
   // --- Daily log (体重/睡眠) ---
   if (extracted.daily_log_delete_date) {
-    summary.daily_log_deleted = await deleteDailyLogByDate(db, userId, extracted.daily_log_delete_date, contextText);
+    summary.daily_log_deleted = await deleteDailyLogByDate(
+      db,
+      userId,
+      extracted.daily_log_delete_date,
+      contextText,
+      requestDateAnchor
+    );
   }
-  summary.daily_log_upserted = await applyDailyLog(db, userId, extracted.daily_log);
+  summary.daily_log_upserted = await applyDailyLog(db, userId, extracted.daily_log, requestDateAnchor);
 
   return summary;
 }

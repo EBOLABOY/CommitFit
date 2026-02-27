@@ -8,7 +8,7 @@ import { Card, EmptyState, Skeleton } from '../../components/ui';
 import { CalendarPicker } from '../../components/CalendarPicker';
 import { Spacing, Radius, FontSize } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import type { DietRecord, MealType } from '../../../shared/types';
+import type { DietRecord, MealType } from '@shared/types';
 
 const MEAL_LABELS: Record<MealType, string> = {
   breakfast: '早餐',

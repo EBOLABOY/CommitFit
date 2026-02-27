@@ -2,7 +2,7 @@ import { AIChatAgent, type OnChatMessageOptions } from '@cloudflare/ai-chat';
 import { streamText, tool, convertToModelMessages, stepCountIs, type StreamTextOnFinishCallback, type ToolSet } from 'ai';
 import type { Connection, ConnectionContext } from 'agents';
 import { jwtVerify } from 'jose';
-import type { AIRole, AgentExecutionProfile, AgentLifecycleState } from '../../../shared/types';
+import type { AIRole, AgentExecutionProfile, AgentLifecycleState, WritebackRequestMeta } from '@shared/types';
 import type { Bindings } from '../types';
 import { getLLMRuntimeInfo, getMainLLMModel, getRoleLLMModel } from '../services/ai-provider';
 import { queryUserDataToolSchema } from './query-user-data-tool';
@@ -66,6 +66,7 @@ const MIN_HISTORY_TOKEN_BUDGET = 2000;
 const WS_CONNECT_WINDOW_SECONDS = 60;
 const WS_CONNECT_USER_LIMIT = 30;
 const WS_CONNECT_IP_LIMIT = 60;
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 type RateLimitState = {
   timestamps: number[];
@@ -142,6 +143,35 @@ function isValidPreferredRole(value: unknown): value is AIRole {
 function resolveActiveRole(value: string | undefined): AIRole {
   if (isValidPreferredRole(value)) return value;
   return 'trainer';
+}
+
+function normalizeWritebackRequestMeta(body: Record<string, unknown>): WritebackRequestMeta | undefined {
+  const next: WritebackRequestMeta = {};
+
+  const rawRequestAt = body.client_request_at;
+  if (typeof rawRequestAt === 'string' && rawRequestAt.trim()) {
+    next.client_request_at = rawRequestAt.trim().slice(0, 64);
+  }
+
+  const rawTimezone = body.client_timezone;
+  if (typeof rawTimezone === 'string' && rawTimezone.trim()) {
+    next.client_timezone = rawTimezone.trim().slice(0, 64);
+  }
+
+  const rawLocalDate = body.client_local_date;
+  if (typeof rawLocalDate === 'string' && DATE_ONLY_REGEX.test(rawLocalDate)) {
+    next.client_local_date = rawLocalDate;
+  }
+
+  const rawOffset = body.client_utc_offset_minutes;
+  if (typeof rawOffset === 'number' && Number.isFinite(rawOffset)) {
+    const offset = Math.trunc(rawOffset);
+    if (offset >= -840 && offset <= 840) {
+      next.client_utc_offset_minutes = offset;
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 function extractImageUrl(msg: AgentMessageLike | undefined): string | null {
@@ -336,6 +366,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
     const sessionId = typeof body.session_id === 'string' && body.session_id.trim()
       ? body.session_id.trim().slice(0, 64)
       : 'default';
+    const writebackRequestMeta = normalizeWritebackRequestMeta(body);
 
     const textResponse = (text: string): Response =>
       new Response(text, {
@@ -477,6 +508,24 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const writebackModeRaw = typeof this.env.WRITEBACK_MODE === 'string' ? this.env.WRITEBACK_MODE : 'remote';
       const writebackMode = writebackModeRaw.toLowerCase();
       const isLocalFirstWriteback = writebackMode !== 'remote';
+      const requestTimeGuidance = (() => {
+        if (!writebackRequestMeta) return null;
+        const parts: string[] = [];
+        if (typeof writebackRequestMeta.client_local_date === 'string') {
+          parts.push(`用户本地日期=${writebackRequestMeta.client_local_date}`);
+        }
+        if (typeof writebackRequestMeta.client_request_at === 'string') {
+          parts.push(`请求时刻=${writebackRequestMeta.client_request_at}`);
+        }
+        if (typeof writebackRequestMeta.client_timezone === 'string') {
+          parts.push(`时区=${writebackRequestMeta.client_timezone}`);
+        }
+        if (typeof writebackRequestMeta.client_utc_offset_minutes === 'number') {
+          parts.push(`UTC偏移分钟=${writebackRequestMeta.client_utc_offset_minutes}`);
+        }
+        if (parts.length === 0) return null;
+        return `时间基准：${parts.join('，')}。遇到“今天/昨天/前天/明天/本周”等相对日期时，先按此基准换算为 YYYY-MM-DD，再写入对应 *_date 字段。`;
+      })();
       const executionProfileGuidance = executionDecision.effectiveExecutionProfile === 'plan'
         ? '执行模式：plan（只读分析）。禁止任何写回与修改操作。'
         : '执行模式：build（可执行写回操作）。';
@@ -490,6 +539,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           '工具选择：非破坏性更新优先用 *_patch / *_upsert / *_set；删除/清空使用 *_delete / *_clear_all（破坏性操作请谨慎）。',
           executionProfileGuidance,
           writebackModeGuidance,
+          requestTimeGuidance || '时间基准：未提供客户端时间，必要时先向用户确认具体日期（YYYY-MM-DD）再写回。',
           '模块映射：训练目标仅使用 training_goals_*；伤病记录仅使用 conditions_*；理化指标仅使用 health_metrics_*；饮食记录仅使用 diet_records_*。',
           '禁止账号/密码类操作；禁止把客套话写入数据字段。',
           '输出约束：工具执行期间不要反复输出“好的，我现在…”这类阶段性确认语；同义确认语不要重复改写发送。',
@@ -520,7 +570,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
       const queryUserDataTool = tool({
         description: [
           '查询用户数据（只读）。用于回答用户关于其历史记录/当前数据的问题。',
-          '禁止返回或推断任何账户/密码敏感信息（如 password_hash、JWT_SECRET、LLM_API_KEY 等）。',
+          '禁止返回或推断任何账户/密码敏感信息（如 password_hash、JWT_SECRET、api_key 等）。',
           '返回结果请尽量简洁，必要时让用户缩小时间范围或指定条目。',
         ].join('\n'),
         inputSchema: queryUserDataToolSchema,
@@ -901,15 +951,22 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
                     };
 
                     const tMin = toMinutes(trainingStart);
-                    const bMin = toMinutes(breakfastTime);
-                    const lMin = toMinutes(lunchTime);
-                    const dMin = toMinutes(dinnerTime);
-                    if (tMin != null && bMin != null && lMin != null && dMin != null) {
+                    if (tMin != null) {
+                      const mealOrderIndex: Record<'早餐' | '午餐' | '晚餐', number> = {
+                        早餐: 0,
+                        午餐: 1,
+                        晚餐: 2,
+                      };
+                      const fallbackMealMinutes: Record<'早餐' | '午餐' | '晚餐', number> = {
+                        早餐: 8 * 60,
+                        午餐: 12 * 60,
+                        晚餐: 19 * 60,
+                      };
                       const meals = [
-                        { name: '早餐', min: bMin },
-                        { name: '午餐', min: lMin },
-                        { name: '晚餐', min: dMin },
-                      ].sort((a, b) => a.min - b.min);
+                        { name: '早餐' as const, min: toMinutes(breakfastTime) ?? fallbackMealMinutes.早餐 },
+                        { name: '午餐' as const, min: toMinutes(lunchTime) ?? fallbackMealMinutes.午餐 },
+                        { name: '晚餐' as const, min: toMinutes(dinnerTime) ?? fallbackMealMinutes.晚餐 },
+                      ].sort((a, b) => a.min - b.min || mealOrderIndex[a.name] - mealOrderIndex[b.name]);
                       const insertIdx = (() => {
                         const idx = meals.findIndex((m) => tMin <= m.min);
                         return idx >= 0 ? idx : meals.length;
@@ -1194,7 +1251,10 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
 
         if (!isLocalFirstWriteback) {
           await emitLifecycleState('writeback_committing', toolName);
-          const summary = await applyAutoWriteback(this.env.DB, userId, payload as any, { contextText: userText });
+          const summary = await applyAutoWriteback(this.env.DB, userId, payload as any, {
+            contextText: userText,
+            requestMeta: writebackRequestMeta,
+          });
           const syncBroadcast: ProfileSyncResultBroadcast = { type: 'profile_sync_result', summary };
           this.broadcastCustom(syncBroadcast);
           try {
@@ -1265,6 +1325,7 @@ export class SupervisorAgent extends AIChatAgent<Bindings> {
           summary_text: summaryText,
           payload,
           context_text: userText,
+          request_meta: writebackRequestMeta,
         };
       };
 

@@ -1,5 +1,7 @@
 import { API_BASE_URL, SUPERVISOR_AGENT_NAMESPACE } from '../constants';
-import { getToken } from './api';
+import { api, getToken } from './api';
+import { getResolvedAIConfig } from '../stores/ai-config';
+import { getCustomAIKey } from './ai-config-secure';
 
 type StreamSingleRoleOptions = {
   message: string;
@@ -91,7 +93,135 @@ function parseStreamChunkBody(body: unknown): Record<string, unknown> | null {
   return null;
 }
 
-export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): Promise<void> {
+function normalizeAssistantText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((item) => {
+      if (!item || typeof item !== 'object') return '';
+      const obj = item as Record<string, unknown>;
+      return typeof obj.text === 'string' ? obj.text : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function uniqueCustomModels(primary: string, fallback: string): string[] {
+  const models = [primary.trim(), fallback.trim()].filter(Boolean);
+  return Array.from(new Set(models));
+}
+
+async function streamSingleRoleByCustom(
+  options: StreamSingleRoleOptions,
+  token: string,
+  userId: string,
+  apiKey: string
+): Promise<void> {
+  const {
+    message,
+    imageDataUri,
+    sessionId = `utility-${Date.now()}`,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    onChunk,
+    onDone,
+    onError,
+  } = options;
+
+  const resolved = getResolvedAIConfig();
+  if (!resolved.custom_ready) {
+    onError(new Error('自定义代理配置不完整'));
+    return;
+  }
+
+  const runtime = await api.getAgentRuntimeContext('trainer', sessionId);
+  if (!runtime.success || !runtime.data) {
+    onError(new Error(runtime.error || '获取运行时上下文失败'));
+    return;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+
+  try {
+    const userContent = imageDataUri
+      ? [
+          { type: 'image_url', image_url: { url: imageDataUri } },
+          { type: 'text', text: message },
+        ]
+      : message;
+
+    const modelCandidates = uniqueCustomModels(resolved.custom_primary_model, resolved.custom_fallback_model);
+    const errors: string[] = [];
+    let parsedObj: Record<string, unknown> | null = null;
+
+    for (const model of modelCandidates) {
+      const response = await fetch(`${resolved.custom_base_url.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          temperature: 0.35,
+          messages: [
+            {
+              role: 'system',
+              content: `${runtime.data.system_prompt}\n\n${runtime.data.context_text}\n\n执行模式：build`,
+            },
+            { role: 'user', content: userContent },
+          ],
+        }),
+        signal: controller.signal,
+      });
+
+      const raw = await response.text();
+      let parsed: unknown = null;
+      try {
+        parsed = raw ? JSON.parse(raw) : null;
+      } catch {
+        parsed = null;
+      }
+
+      if (response.ok && parsed && typeof parsed === 'object') {
+        parsedObj = parsed as Record<string, unknown>;
+        break;
+      }
+
+      const err = parsed && typeof parsed === 'object' ? JSON.stringify(parsed) : raw;
+      errors.push(`${model}: ${err || response.status}`);
+    }
+
+    if (!parsedObj) {
+      onError(new Error(`自定义代理调用失败: ${errors.join(' | ') || '未知错误'}`));
+      return;
+    }
+
+    const obj = parsedObj;
+    const choices = Array.isArray(obj.choices) ? obj.choices : [];
+    const first = choices[0] as Record<string, unknown> | undefined;
+    const messageObj = first && typeof first.message === 'object' && first.message !== null
+      ? first.message as Record<string, unknown>
+      : null;
+
+    const text = messageObj ? normalizeAssistantText(messageObj.content) : '';
+    if (text) onChunk(text);
+    onDone();
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      onError(new Error('请求超时，请稍后重试'));
+      return;
+    }
+    onError(new Error(error instanceof Error ? error.message : '自定义代理请求失败'));
+  } finally {
+    clearTimeout(timer);
+    void token;
+    void userId;
+  }
+}
+
+async function streamSingleRoleByWorkers(options: StreamSingleRoleOptions, token: string, userId: string): Promise<void> {
   const {
     message,
     imageDataUri,
@@ -102,18 +232,6 @@ export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): P
     onDone,
     onError,
   } = options;
-
-  const token = await getToken();
-  if (!token) {
-    onError(new Error('未登录，请重新登录'));
-    return;
-  }
-
-  const userId = resolveUserIdFromToken(token);
-  if (!userId) {
-    onError(new Error('无法解析用户身份，请重新登录'));
-    return;
-  }
 
   const utilityAgentName = `${userId}:utility`;
   const wsUrl = `${getWSBaseURL()}/agents/${SUPERVISOR_AGENT_NAMESPACE}/${encodeURIComponent(utilityAgentName)}?token=${encodeURIComponent(token)}&sid=${encodeURIComponent(sessionId)}`;
@@ -267,4 +385,29 @@ export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): P
     }
     fail(new Error('连接中断，请重试'));
   };
+}
+
+export async function streamSingleRoleAgent(options: StreamSingleRoleOptions): Promise<void> {
+  const token = await getToken();
+  if (!token) {
+    options.onError(new Error('未登录，请重新登录'));
+    return;
+  }
+
+  const userId = resolveUserIdFromToken(token);
+  if (!userId) {
+    options.onError(new Error('无法解析用户身份，请重新登录'));
+    return;
+  }
+
+  const resolved = getResolvedAIConfig();
+  if (resolved.effective_provider === 'custom' && resolved.custom_ready) {
+    const apiKey = await getCustomAIKey(userId);
+    if (apiKey && apiKey.trim()) {
+      await streamSingleRoleByCustom(options, token, userId, apiKey.trim());
+      return;
+    }
+  }
+
+  await streamSingleRoleByWorkers(options, token, userId);
 }

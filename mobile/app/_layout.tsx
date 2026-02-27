@@ -129,6 +129,10 @@ export default function RootLayout() {
           options={{ headerShown: true, title: '修改密码' }}
         />
         <Stack.Screen
+          name="profile/ai-settings"
+          options={{ headerShown: true, title: 'AI 配置' }}
+        />
+        <Stack.Screen
           name="diet/record"
           options={{ headerShown: true, title: '记录饮食' }}
         />

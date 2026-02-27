@@ -5,7 +5,7 @@ import Svg, { G, Polyline, Circle, Line, Text as SvgText } from 'react-native-sv
 import { Spacing, Radius, FontSize, Shadows } from '../constants';
 import { useThemeColor } from '../hooks/useThemeColor';
 import { api } from '../services/api';
-import type { DailyLog } from '../../shared/types';
+import type { DailyLog } from '@shared/types';
 
 interface WeightChartModalProps {
   visible: boolean;

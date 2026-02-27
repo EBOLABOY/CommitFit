@@ -17,6 +17,8 @@ export interface StructuredSupplementPlan {
   sections: Record<SupplementSectionName, string[]>;
 }
 
+const SUPPLEMENT_PREFIX = '【补剂方案】';
+
 export const SUPPLEMENT_KEYWORDS = [
   '补剂',
   '蛋白粉',
@@ -43,6 +45,102 @@ export type DailyScheduleLike = {
   dinner_time?: string | null;
 };
 
+type TimedMealName = '早餐' | '午餐' | '晚餐';
+
+const TIMED_MEAL_ORDER: TimedMealName[] = ['早餐', '午餐', '晚餐'];
+const TIMED_MEAL_INDEX: Record<TimedMealName, number> = {
+  早餐: 0,
+  午餐: 1,
+  晚餐: 2,
+};
+const FALLBACK_MEAL_MINUTES: Record<TimedMealName, number> = {
+  早餐: 8 * 60,
+  午餐: 12 * 60,
+  晚餐: 19 * 60,
+};
+
+function isListItemLine(line: string): boolean {
+  return /^[-*•]\s+/.test(line);
+}
+
+function isExplicitHeadingLine(line: string): boolean {
+  if (isListItemLine(line)) return false;
+  return /^#{1,6}\s*/.test(line) || /^\*\*.+\*\*$/.test(line) || /^\d+[.)、]\s*/.test(line);
+}
+
+function normalizeHeadingTextForSectionDetection(line: string): string {
+  const raw = line
+    .replace(/\u3000/g, ' ')
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^\*+|\*+$/g, '')
+    .replace(/^[\d]+[.)、]\s*/, '')
+    .replace(/[：:]\s*$/, '')
+    .trim();
+  return raw.replace(/\s+/g, '');
+}
+
+function detectSupplementSectionByHeadingLine(line: string): SupplementSectionName | null {
+  const compact = normalizeHeadingTextForSectionDetection(line);
+  if (!compact) return null;
+  if (compact.startsWith('早餐')) return '早餐';
+  if (compact.startsWith('午餐')) return '午餐';
+  if (compact.startsWith('晚餐')) return '晚餐';
+  if (compact.startsWith('睡前')) return '睡前';
+  if (compact.startsWith('练前餐') || compact.startsWith('训练前餐')) return null;
+  if (compact.startsWith('练后餐') || compact.startsWith('训练后餐')) return null;
+  if (compact.startsWith('练前') || compact.startsWith('训练前')) return '练前';
+  if (compact.startsWith('练后') || compact.startsWith('训练后')) return '练后';
+  return null;
+}
+
+function parseInlineHeadingLine<T extends string>(
+  line: string,
+  headings: readonly T[]
+): { heading: T; content: string } | null {
+  const normalized = line
+    .replace(/\u3000/g, ' ')
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^\*+|\*+$/g, '')
+    .replace(/^[\d]+[.)、]\s*/, '')
+    .trim();
+
+  if (!normalized) return null;
+
+  for (const heading of headings) {
+    const m = normalized.match(new RegExp(`^${heading}\\s*[：:]\\s*(.+)$`));
+    if (m) {
+      const content = m[1].trim();
+      if (content) return { heading, content };
+    }
+  }
+  return null;
+}
+
+function hasLegacySupplementStructure(text: string): boolean {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return false;
+
+  let workoutHeadingCount = 0;
+  let hasKeyword = false;
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (!hasKeyword && SUPPLEMENT_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()))) {
+      hasKeyword = true;
+    }
+    if (!isExplicitHeadingLine(line)) continue;
+    const section = detectSupplementSectionByHeadingLine(line);
+    if (section === '练前' || section === '练后' || section === '睡前') {
+      workoutHeadingCount += 1;
+    }
+  }
+
+  return hasKeyword && workoutHeadingCount >= 2;
+}
+
 function timeToMinutes(value: string | null | undefined): number | null {
   if (!value) return null;
   const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
@@ -53,20 +151,23 @@ function timeToMinutes(value: string | null | undefined): number | null {
   return hh * 60 + mm;
 }
 
+function buildTimedMeals(schedule?: DailyScheduleLike | null): Array<{ name: TimedMealName; min: number }> {
+  const minutesMap: Record<TimedMealName, number> = {
+    早餐: timeToMinutes(schedule?.breakfast_time) ?? FALLBACK_MEAL_MINUTES.早餐,
+    午餐: timeToMinutes(schedule?.lunch_time) ?? FALLBACK_MEAL_MINUTES.午餐,
+    晚餐: timeToMinutes(schedule?.dinner_time) ?? FALLBACK_MEAL_MINUTES.晚餐,
+  };
+
+  return TIMED_MEAL_ORDER
+    .map((name) => ({ name, min: minutesMap[name] }))
+    .sort((a, b) => a.min - b.min || TIMED_MEAL_INDEX[a.name] - TIMED_MEAL_INDEX[b.name]);
+}
+
 export function getMealOrder(schedule?: DailyScheduleLike | null): MealName[] {
   const tMin = timeToMinutes(schedule?.training_start_time);
-  const bMin = timeToMinutes(schedule?.breakfast_time);
-  const lMin = timeToMinutes(schedule?.lunch_time);
-  const dMin = timeToMinutes(schedule?.dinner_time);
+  if (tMin == null) return MEAL_ORDER;
 
-  // 训练时间/三餐时间缺失时，回退为默认展示顺序
-  if (tMin == null || bMin == null || lMin == null || dMin == null) return MEAL_ORDER;
-
-  const meals = [
-    { name: '早餐' as const, min: bMin },
-    { name: '午餐' as const, min: lMin },
-    { name: '晚餐' as const, min: dMin },
-  ].sort((a, b) => a.min - b.min);
+  const meals = buildTimedMeals(schedule);
 
   const insertIdx = (() => {
     const idx = meals.findIndex((m) => tMin <= m.min);
@@ -80,17 +181,9 @@ export function getMealOrder(schedule?: DailyScheduleLike | null): MealName[] {
 
 export function getSupplementSectionOrder(schedule?: DailyScheduleLike | null): SupplementSectionName[] {
   const tMin = timeToMinutes(schedule?.training_start_time);
-  const bMin = timeToMinutes(schedule?.breakfast_time);
-  const lMin = timeToMinutes(schedule?.lunch_time);
-  const dMin = timeToMinutes(schedule?.dinner_time);
+  if (tMin == null) return SUPPLEMENT_SECTION_ORDER;
 
-  if (tMin == null || bMin == null || lMin == null || dMin == null) return SUPPLEMENT_SECTION_ORDER;
-
-  const meals = [
-    { name: '早餐' as const, min: bMin },
-    { name: '午餐' as const, min: lMin },
-    { name: '晚餐' as const, min: dMin },
-  ].sort((a, b) => a.min - b.min);
+  const meals = buildTimedMeals(schedule);
 
   const insertIdx = (() => {
     const idx = meals.findIndex((m) => tMin <= m.min);
@@ -103,8 +196,12 @@ export function getSupplementSectionOrder(schedule?: DailyScheduleLike | null): 
 }
 
 export function isSupplementPlan(content: string): boolean {
-  const normalized = parseContent(content).toLowerCase();
-  return SUPPLEMENT_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));
+  const normalized = parseContent(content).replace(/\r/g, '').trim();
+  if (!normalized) return false;
+  if (normalized.startsWith(SUPPLEMENT_PREFIX)) return true;
+  if (/(^|\n)\s*(#{1,6}\s*)?补剂方案/.test(normalized)) return true;
+  if (/(^|\n)\s*(#{1,6}\s*)?分时段补剂方案/.test(normalized)) return true;
+  return hasLegacySupplementStructure(normalized);
 }
 
 export function parseStructuredNutritionPlan(content: string): StructuredNutritionPlan | null {
@@ -137,26 +234,46 @@ export function parseStructuredNutritionPlan(content: string): StructuredNutriti
     const heading = line.replace(/^#{1,6}\s*/, '').replace(/[：:]\s*$/, '').trim();
     const compactHeading = heading.replace(/\s+/g, '');
     const plainMealHeading = line.match(/^(早餐|练前餐|训练前餐|午餐|练后餐|训练后餐|晚餐)\s*[：:]?\s*$/)?.[1];
+    const inlineMealHeading = parseInlineHeadingLine(
+      line,
+      ['早餐', '练前餐', '训练前餐', '午餐', '练后餐', '训练后餐', '晚餐'] as const
+    );
+    const canDetectHeading = isExplicitHeadingLine(line) || !!plainMealHeading || !!inlineMealHeading;
 
     // Order matters: check 练前餐/练后餐 before 午餐/晚餐 to avoid partial match
-    if (compactHeading.includes('练前餐') || compactHeading.includes('训练前餐') || plainMealHeading === '练前餐' || plainMealHeading === '训练前餐') {
+    if (canDetectHeading && (compactHeading.includes('练前餐') || compactHeading.includes('训练前餐') || plainMealHeading === '练前餐' || plainMealHeading === '训练前餐')) {
       currentMeal = '练前餐';
+      if (inlineMealHeading && (inlineMealHeading.heading === '练前餐' || inlineMealHeading.heading === '训练前餐')) {
+        meals[currentMeal].push(inlineMealHeading.content);
+      }
       continue;
     }
-    if (compactHeading.includes('练后餐') || compactHeading.includes('训练后餐') || plainMealHeading === '练后餐' || plainMealHeading === '训练后餐') {
+    if (canDetectHeading && (compactHeading.includes('练后餐') || compactHeading.includes('训练后餐') || plainMealHeading === '练后餐' || plainMealHeading === '训练后餐')) {
       currentMeal = '练后餐';
+      if (inlineMealHeading && (inlineMealHeading.heading === '练后餐' || inlineMealHeading.heading === '训练后餐')) {
+        meals[currentMeal].push(inlineMealHeading.content);
+      }
       continue;
     }
-    if (compactHeading.includes('早餐') || plainMealHeading === '早餐') {
+    if (canDetectHeading && (compactHeading.includes('早餐') || plainMealHeading === '早餐')) {
       currentMeal = '早餐';
+      if (inlineMealHeading && inlineMealHeading.heading === '早餐') {
+        meals[currentMeal].push(inlineMealHeading.content);
+      }
       continue;
     }
-    if (compactHeading.includes('午餐') || plainMealHeading === '午餐') {
+    if (canDetectHeading && (compactHeading.includes('午餐') || plainMealHeading === '午餐')) {
       currentMeal = '午餐';
+      if (inlineMealHeading && inlineMealHeading.heading === '午餐') {
+        meals[currentMeal].push(inlineMealHeading.content);
+      }
       continue;
     }
-    if (compactHeading.includes('晚餐') || plainMealHeading === '晚餐') {
+    if (canDetectHeading && (compactHeading.includes('晚餐') || plainMealHeading === '晚餐')) {
       currentMeal = '晚餐';
+      if (inlineMealHeading && inlineMealHeading.heading === '晚餐') {
+        meals[currentMeal].push(inlineMealHeading.content);
+      }
       continue;
     }
 
@@ -227,16 +344,50 @@ export function parseStructuredSupplementPlan(content: string): StructuredSupple
     const heading = line.replace(/^#{1,6}\s*/, '').replace(/[：:]\s*$/, '').trim();
     const compactHeading = heading.replace(/\s+/g, '');
     const plainSectionHeading = line.match(/^(早餐|午餐|练前|训练前|练后|训练后|晚餐|睡前)\s*[：:]?\s*$/)?.[1];
+    const plainMetaHeading = line.match(/^(补剂方案依据|总剂量与注意事项|注意事项)\s*[：:]?\s*$/)?.[1];
+    const inlineSectionHeading = parseInlineHeadingLine(
+      line,
+      ['早餐', '午餐', '练前', '训练前', '练后', '训练后', '晚餐', '睡前'] as const
+    );
+    const inlineMetaHeading = parseInlineHeadingLine(
+      line,
+      ['补剂方案依据', '总剂量与注意事项', '注意事项'] as const
+    );
+    const canDetectHeading =
+      isExplicitHeadingLine(line) || !!plainSectionHeading || !!plainMetaHeading || !!inlineSectionHeading || !!inlineMetaHeading;
 
-    if (compactHeading.includes('补剂方案依据')) {
+    if (
+      canDetectHeading
+      && (
+        compactHeading.includes('补剂方案依据')
+        || plainMetaHeading === '补剂方案依据'
+        || inlineMetaHeading?.heading === '补剂方案依据'
+      )
+    ) {
       mode = 'basis';
       currentSection = null;
+      if (inlineMetaHeading && inlineMetaHeading.heading === '补剂方案依据') {
+        basis.push(inlineMetaHeading.content);
+      }
       continue;
     }
 
-    if (compactHeading.includes('总剂量与注意事项') || compactHeading.includes('注意事项')) {
+    if (
+      canDetectHeading
+      && (
+        compactHeading.includes('总剂量与注意事项')
+        || compactHeading.includes('注意事项')
+        || plainMetaHeading === '总剂量与注意事项'
+        || plainMetaHeading === '注意事项'
+        || inlineMetaHeading?.heading === '总剂量与注意事项'
+        || inlineMetaHeading?.heading === '注意事项'
+      )
+    ) {
       mode = 'notes';
       currentSection = null;
+      if (inlineMetaHeading && (inlineMetaHeading.heading === '总剂量与注意事项' || inlineMetaHeading.heading === '注意事项')) {
+        notes.push(inlineMetaHeading.content);
+      }
       continue;
     }
 
@@ -250,12 +401,14 @@ export function parseStructuredSupplementPlan(content: string): StructuredSupple
       晚餐: '晚餐',
       睡前: '睡前',
     };
-
-    const headingMatch = Object.keys(sectionMap).find((key) => compactHeading.includes(key));
-    if (headingMatch || plainSectionHeading) {
-      const key = (plainSectionHeading || headingMatch || '') as keyof typeof sectionMap;
-      currentSection = sectionMap[key];
+    const detectedByHeading = canDetectHeading ? detectSupplementSectionByHeadingLine(line) : null;
+    if (detectedByHeading || plainSectionHeading || inlineSectionHeading) {
+      const headingKey = inlineSectionHeading?.heading ?? plainSectionHeading;
+      currentSection = headingKey ? sectionMap[headingKey] : detectedByHeading;
       mode = 'section';
+      if (inlineSectionHeading && currentSection) {
+        sections[currentSection].push(inlineSectionHeading.content);
+      }
       continue;
     }
 

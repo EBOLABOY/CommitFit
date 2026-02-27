@@ -18,7 +18,7 @@ import { useImageAnalysis, parseAIJson } from '../../hooks/useImageAnalysis';
 import { Card, Button, Badge, EmptyState, Skeleton, FormField, OptionPicker, ThemedInput } from '../../components/ui';
 import { Spacing, Radius, FontSize, SEVERITY_LABELS, HitSlop } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import type { Condition, Severity } from '../../../shared/types';
+import type { Condition, Severity } from '@shared/types';
 
 export default function ConditionsScreen() {
   const Colors = useThemeColor();

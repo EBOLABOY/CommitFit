@@ -5,7 +5,8 @@ import type {
   OrchestrateAutoWriteSummary,
   WritebackCommitResponseData,
   WritebackDraftStatus,
-} from '../../shared/types';
+  WritebackRequestMeta,
+} from '@shared/types';
 import { api } from '../services/api';
 
 export interface WritebackDraft {
@@ -14,6 +15,7 @@ export interface WritebackDraft {
   summary_text: string;
   payload: Record<string, unknown>;
   context_text: string;
+  request_meta?: WritebackRequestMeta;
   status: WritebackDraftStatus;
   created_at: number;
   attempts: number;
@@ -34,6 +36,34 @@ interface WritebackOutboxState {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeWritebackRequestMeta(value: unknown): WritebackRequestMeta | undefined {
+  if (!isPlainObject(value)) return undefined;
+
+  const next: WritebackRequestMeta = {};
+  const clientRequestAt = value.client_request_at;
+  const clientTimezone = value.client_timezone;
+  const clientLocalDate = value.client_local_date;
+  const clientUtcOffsetMinutes = value.client_utc_offset_minutes;
+
+  if (typeof clientRequestAt === 'string' && clientRequestAt.trim()) {
+    next.client_request_at = clientRequestAt.trim();
+  }
+  if (typeof clientTimezone === 'string' && clientTimezone.trim()) {
+    next.client_timezone = clientTimezone.trim();
+  }
+  if (typeof clientLocalDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clientLocalDate)) {
+    next.client_local_date = clientLocalDate;
+  }
+  if (typeof clientUtcOffsetMinutes === 'number' && Number.isFinite(clientUtcOffsetMinutes)) {
+    const rounded = Math.trunc(clientUtcOffsetMinutes);
+    if (rounded >= -840 && rounded <= 840) {
+      next.client_utc_offset_minutes = rounded;
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 const WRITEBACK_OUTBOX_PERSIST_VERSION = 2;
@@ -68,6 +98,7 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
             summary_text: draft.summary_text || '已生成同步草稿',
             payload: isPlainObject(draft.payload) ? draft.payload : {},
             context_text: typeof draft.context_text === 'string' ? draft.context_text : '',
+            request_meta: sanitizeWritebackRequestMeta(draft.request_meta),
             status: 'queued',
             attempts: 0,
             created_at: createdAt,
@@ -104,6 +135,7 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
               draft_id: current.draft_id,
               payload: current.payload,
               context_text: current.context_text,
+              request_meta: sanitizeWritebackRequestMeta(current.request_meta),
             });
 
             if (!res.success) {
@@ -199,6 +231,7 @@ export const useWritebackOutboxStore = create<WritebackOutboxState>()(
             return {
               ...draft,
               status: normalizeDraftStatus(draft.status),
+              request_meta: sanitizeWritebackRequestMeta(draft.request_meta),
             };
           });
 

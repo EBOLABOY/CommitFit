@@ -9,11 +9,9 @@ routes = [
 ]
 
 [vars]
-LLM_PROVIDER = "workers_ai"
 LLM_MODEL = "@cf/zai-org/glm-4.7-flash"
 LLM_FALLBACK_MODELS = "@cf/meta/llama-3.1-8b-instruct"
 ROLE_LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct"
-LLM_BASE_URL = "https://api.izlx.de/v1"
 ALLOWED_ORIGINS = "http://localhost:8081"
 ACTIVE_AI_ROLE = "trainer"
 WRITEBACK_MODE = "local_first"
@@ -23,7 +21,6 @@ AGENT_EXECUTION_PROFILE_DEFAULT = "build"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # JWT_SECRET
-# LLM_API_KEY
 
 [[d1_databases]]
 binding = "DB"

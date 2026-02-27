@@ -19,7 +19,7 @@ import { useImageAnalysis, parseAIJson } from '../../hooks/useImageAnalysis';
 import { Card, Button, Badge, EmptyState, Skeleton, FormField, ThemedInput } from '../../components/ui';
 import { Spacing, Radius, FontSize, HitSlop } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
-import type { TrainingGoal } from '../../../shared/types';
+import type { TrainingGoal } from '@shared/types';
 
 export default function TrainingGoalScreen() {
   const Colors = useThemeColor();

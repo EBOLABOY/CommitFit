@@ -10,7 +10,7 @@ import { CalendarPicker } from '../../components/CalendarPicker';
 import { Spacing, Radius, FontSize } from '../../constants';
 import { useThemeColor } from '../../hooks/useThemeColor';
 import { parseContent } from '../../utils';
-import type { TrainingPlan } from '../../../shared/types';
+import type { TrainingPlan } from '@shared/types';
 
 // --- Plan parsing (same as home page) ---
 

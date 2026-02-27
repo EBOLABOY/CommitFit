@@ -24,7 +24,7 @@ import { useThemeColor } from '../../hooks/useThemeColor';
 import { api } from '../../services/api';
 import { streamSingleRoleAgent } from '../../services/agent-stream';
 import { Card } from '../../components/ui';
-import type { MealType, FoodAnalysisResult, FoodItem } from '../../../shared/types';
+import type { MealType, FoodAnalysisResult, FoodItem } from '@shared/types';
 
 const MAX_IMAGE_DIMENSION = 1600;
 

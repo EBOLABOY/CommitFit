@@ -35,7 +35,7 @@ import { api } from '../../services/api';
 import { WeightChartModal } from '../../components/WeightChartModal';
 import { buildDailySchedule } from '../../utils/schedule';
 import type { ScheduleSlot, ScheduleSlotId } from '../../utils/schedule';
-import type { TrainingPlan, NutritionPlan, DietRecord, MealType, DailyLog } from '../../../shared/types';
+import type { TrainingPlan, NutritionPlan, DietRecord, MealType, DailyLog } from '@shared/types';
 import type { ThemeColors } from '../../constants';
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
@@ -420,7 +420,8 @@ export default function HomeScreen() {
   const themeColors = useThemeColor();
   const insets = useSafeAreaInsets();
   const user = useAuthStore((s) => s.user);
-  const { fetchProfile } = useProfileStore();
+  const profile = useProfileStore((s) => s.profile);
+  const fetchProfile = useProfileStore((s) => s.fetchProfile);
   const lastCommitted = useWritebackOutboxStore((s) => s.lastCommitted);
   const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
@@ -632,8 +633,8 @@ export default function HomeScreen() {
   // ---- Schedule logic ----
 
   const scheduleSlots = useMemo(
-    () => buildDailySchedule(todayPlan, nutritionPlans),
-    [todayPlan, nutritionPlans]
+    () => buildDailySchedule(todayPlan, nutritionPlans, profile),
+    [todayPlan, nutritionPlans, profile]
   );
 
   const scheduleLoading = planLoading || nutritionLoading;

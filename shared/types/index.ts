@@ -14,6 +14,7 @@ export const AI_ROLE_NAMES: Record<AIRole, string> = {
 export type AgentFlowMode = 'dual' | 'governed';
 export type AgentApprovalFallback = 'auto_approve' | 'reject';
 export type AgentExecutionProfile = 'plan' | 'build';
+export type DirectAgentExecutionProfile = AgentExecutionProfile;
 export type AgentLifecycleState =
   | 'idle'
   | 'sending'
@@ -29,12 +30,52 @@ export type WritebackDraftStatus = 'queued' | 'committing' | 'pending_remote' | 
 export type WritebackCommitStatus = 'success' | 'pending' | 'failed' | string;
 export type WritebackCommitState = 'success' | 'pending_remote' | string;
 
+export interface WritebackRequestMeta {
+  client_request_at?: string;
+  client_timezone?: string;
+  client_local_date?: string;
+  client_utc_offset_minutes?: number;
+}
+
 export interface WritebackCommitResponseData {
   draft_id: string;
   status: WritebackCommitStatus;
   state?: WritebackCommitState;
   summary?: OrchestrateAutoWriteSummary | null;
   committed?: boolean;
+}
+
+export type MobileAIProvider = 'workers' | 'custom';
+
+export interface MobileAIConfig {
+  provider: MobileAIProvider;
+  custom_base_url: string;
+  custom_primary_model: string;
+  custom_fallback_model: string;
+  custom_api_key_configured: boolean;
+}
+
+export interface MobileAIResolvedConfig {
+  provider: MobileAIProvider;
+  effective_provider: MobileAIProvider;
+  custom_base_url: string;
+  custom_primary_model: string;
+  custom_fallback_model: string;
+  custom_api_key_configured: boolean;
+  custom_ready: boolean;
+}
+
+export interface AgentRuntimeContextResponse {
+  role: AIRole;
+  role_name: string;
+  system_prompt: string;
+  context_text: string;
+  writeback_mode: string;
+  execution_defaults: {
+    flow_mode: AgentFlowMode;
+    approval_fallback: AgentApprovalFallback;
+    default_execution_profile: AgentExecutionProfile;
+  };
 }
 
 // ============ Auth ============

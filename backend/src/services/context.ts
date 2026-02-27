@@ -102,16 +102,24 @@ export function buildContextForRole(role: AIRole, ctx: UserContext): string {
     };
 
     const tMin = toMinutes(trainingStart);
-    const bMin = toMinutes(breakfastTime);
-    const lMin = toMinutes(lunchTime);
-    const dMin = toMinutes(dinnerTime);
-    if (tMin == null || bMin == null || lMin == null || dMin == null) return scheduleText;
+    if (tMin == null) return scheduleText;
+
+    const mealOrderIndex: Record<'早餐' | '午餐' | '晚餐', number> = {
+      早餐: 0,
+      午餐: 1,
+      晚餐: 2,
+    };
+    const fallbackMealMinutes: Record<'早餐' | '午餐' | '晚餐', number> = {
+      早餐: 8 * 60,
+      午餐: 12 * 60,
+      晚餐: 19 * 60,
+    };
 
     const meals = [
-      { name: '早餐', min: bMin },
-      { name: '午餐', min: lMin },
-      { name: '晚餐', min: dMin },
-    ].sort((a, b) => a.min - b.min);
+      { name: '早餐' as const, min: toMinutes(breakfastTime) ?? fallbackMealMinutes.早餐 },
+      { name: '午餐' as const, min: toMinutes(lunchTime) ?? fallbackMealMinutes.午餐 },
+      { name: '晚餐' as const, min: toMinutes(dinnerTime) ?? fallbackMealMinutes.晚餐 },
+    ].sort((a, b) => a.min - b.min || mealOrderIndex[a.name] - mealOrderIndex[b.name]);
     const insertIdx = (() => {
       const idx = meals.findIndex((m) => tMin <= m.min);
       return idx >= 0 ? idx : meals.length;
