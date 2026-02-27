@@ -140,6 +140,43 @@ function parseWSJSON(rawData: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function parseTextJSON(raw: string): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function diagnoseWSRouteFailure(httpProbeUrl: string): Promise<string> {
+  try {
+    const response = await fetch(httpProbeUrl, { method: 'GET' });
+    const raw = await response.text();
+    const parsed = parseTextJSON(raw);
+    const errorCode = typeof parsed?.error === 'string' ? parsed.error : '';
+    const errorId = typeof parsed?.error_id === 'string' ? parsed.error_id : '';
+    const idSuffix = errorId ? `（ID: ${errorId}）` : '';
+
+    if (errorCode === 'AGENT_DO_QUOTA_EXCEEDED') {
+      return `后端 Agent 通道额度已耗尽${idSuffix}，请等待额度重置或升级 Cloudflare 计划`;
+    }
+    if (errorCode === 'AGENT_ROUTE_FAILED') {
+      return `后端 Agent 通道异常${idSuffix}，请联系管理员排查`;
+    }
+    if (response.status >= 500) {
+      return `后端服务异常（HTTP ${response.status}）${idSuffix}`;
+    }
+  } catch {
+    // ignore diagnostics failure, keep generic message
+  }
+  return 'WebSocket 连接失败';
+}
+
 function toLocalDateString(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -553,7 +590,10 @@ export function useWorkersAgentChat(sessionId = 'default', options?: UseWorkersA
       return;
     }
     localHistoryKeyRef.current = makeChatHistoryKey(userId, sessionId);
-    const wsUrl = `${getWSBaseURL()}/agents/${SUPERVISOR_AGENT_NAMESPACE}/${encodeURIComponent(userId)}?token=${encodeURIComponent(token)}&sid=${encodeURIComponent(sessionId)}`;
+    const agentPath = `/agents/${SUPERVISOR_AGENT_NAMESPACE}/${encodeURIComponent(userId)}`;
+    const query = `token=${encodeURIComponent(token)}&sid=${encodeURIComponent(sessionId)}`;
+    const wsUrl = `${getWSBaseURL()}${agentPath}?${query}`;
+    const httpProbeUrl = `${API_BASE_URL}${agentPath}?${query}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
@@ -613,6 +653,9 @@ export function useWorkersAgentChat(sessionId = 'default', options?: UseWorkersA
     ws.onerror = () => {
       updateLifecycleState('error');
       setError('WebSocket 连接失败');
+      void diagnoseWSRouteFailure(httpProbeUrl).then((message) => {
+        setError(message);
+      });
     };
 
     ws.onmessage = (event) => {

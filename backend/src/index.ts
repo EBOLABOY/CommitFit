@@ -20,6 +20,7 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:8081', 'http://localhost:19006'];
 const AGENT_ROUTE_ERROR = 'AGENT_ROUTE_FAILED';
+const AGENT_DO_QUOTA_ERROR = 'AGENT_DO_QUOTA_EXCEEDED';
 
 function isAgentDebugEnabled(raw: string | undefined): boolean {
   if (!raw) return false;
@@ -45,6 +46,14 @@ function toErrorObject(error: unknown): { name: string; message: string; stack?:
       }
     })();
   return { name: 'UnknownError', message };
+}
+
+function resolveAgentErrorCode(message: string): string {
+  const normalized = message.toLowerCase();
+  if (normalized.includes('exceeded allowed rows written in durable objects free tier')) {
+    return AGENT_DO_QUOTA_ERROR;
+  }
+  return AGENT_ROUTE_ERROR;
 }
 
 function resolveAllowedOrigins(raw: string | undefined): string[] {
@@ -81,9 +90,11 @@ app.use('/agents/*', async (c, next) => {
     const errorId = `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const debugEnabled = isAgentDebugEnabled(c.env.AGENT_DEBUG_ENABLED);
     const normalized = toErrorObject(error);
+    const errorCode = resolveAgentErrorCode(normalized.message);
 
     console.error('[agents] route failed', {
       error_id: errorId,
+      error_code: errorCode,
       method: c.req.method,
       path: requestUrl.pathname,
       ws: isWebSocket,
@@ -99,15 +110,15 @@ app.use('/agents/*', async (c, next) => {
 
     if (isWebSocket) {
       const body = debugEnabled
-        ? `${AGENT_ROUTE_ERROR}:${errorId}:${normalized.message}`
-        : `${AGENT_ROUTE_ERROR}:${errorId}`;
+        ? `${errorCode}:${errorId}:${normalized.message}`
+        : `${errorCode}:${errorId}`;
       return new Response(body, { status: 500, headers });
     }
 
     return new Response(
       JSON.stringify({
         success: false,
-        error: AGENT_ROUTE_ERROR,
+        error: errorCode,
         error_id: errorId,
         ...(debugEnabled
           ? {
