@@ -27,19 +27,25 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
-      - name: Setup EAS CLI
-        uses: expo/expo-github-action@v8
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build APK
-        run: eas build --platform android --profile preview --non-interactive
-
-      - name: Get build URL
         run: |
-          echo "Build submitted! Check your Expo dashboard for the APK download link."
-          echo "Dashboard: https://expo.dev/accounts/YOUR_ACCOUNT/projects/lianlema/builds"
+          npx expo prebuild --platform android --non-interactive --no-install
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
