@@ -101,8 +101,10 @@ export default function AISettingsScreen() {
             await setCustomAIKey(user.id, apiKey.trim());
             setCustomApiKeyConfigured(true);
             setApiKey('');
-          } catch {
-            keySaveError = 'API Key 保存失败，请稍后重试';
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '未知错误';
+            console.error('[AISettings] Failed to save custom API key', { userId: user.id, message });
+            keySaveError = `API Key 保存失败：${message}`;
           }
         }
       }
