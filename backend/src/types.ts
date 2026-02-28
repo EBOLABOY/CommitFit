@@ -6,9 +6,14 @@ export type Bindings = {
   R2: R2Bucket;
   AI?: Ai;
   SupervisorAgent: DurableObjectNamespace;
+  LLM_PROVIDER?: string;
   LLM_MODEL: string;
   LLM_FALLBACK_MODELS?: string;
   ROLE_LLM_MODEL?: string;
+  OPENAI_API_KEY?: string;
+  OPENAI_BASE_URL?: string;
+  ANTHROPIC_API_KEY?: string;
+  ANTHROPIC_BASE_URL?: string;
   JWT_SECRET: string;
   ALLOWED_ORIGINS?: string;
   ACTIVE_AI_ROLE?: string;

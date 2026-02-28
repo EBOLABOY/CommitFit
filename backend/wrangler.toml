@@ -9,6 +9,7 @@ routes = [
 ]
 
 [vars]
+LLM_PROVIDER = "workers_ai"
 LLM_MODEL = "@cf/zai-org/glm-4.7-flash"
 LLM_FALLBACK_MODELS = "@cf/meta/llama-3.1-8b-instruct"
 ROLE_LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct"
@@ -23,6 +24,8 @@ AGENT_STREAM_PERSIST_ENABLED = "false"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # JWT_SECRET
+# OPENAI_API_KEY
+# ANTHROPIC_API_KEY
 
 [[d1_databases]]
 binding = "DB"

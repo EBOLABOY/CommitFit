@@ -1,6 +1,6 @@
 import type { Bindings } from '../types';
 import { generateText, type ModelMessage } from 'ai';
-import { getMainLLMModel } from './ai-provider';
+import { getLLMRuntimeInfo, getMainLLMModel } from './ai-provider';
 
 type ContentPart =
   | { type: 'text'; text: string }
@@ -20,10 +20,10 @@ interface LLMCallOptions {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-type WorkersTextPart = { type: 'text'; text: string };
-type WorkersImagePart = { type: 'image'; image: URL };
+type TextPart = { type: 'text'; text: string };
+type ImagePart = { type: 'image'; image: URL };
 
-function toWorkersModelMessages(messages: LLMMessage[]): ModelMessage[] {
+function toModelMessages(messages: LLMMessage[]): ModelMessage[] {
   const converted: ModelMessage[] = [];
 
   for (const message of messages) {
@@ -41,7 +41,7 @@ function toWorkersModelMessages(messages: LLMMessage[]): ModelMessage[] {
       continue;
     }
 
-    const parts: Array<WorkersTextPart | WorkersImagePart> = [];
+    const parts: Array<TextPart | ImagePart> = [];
     for (const part of message.content) {
       if (part.type === 'text') {
         parts.push({ type: 'text', text: part.text });
@@ -73,8 +73,10 @@ export async function callLLM({
   stream = false,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }: LLMCallOptions): Promise<Response> {
+  const runtime = getLLMRuntimeInfo(env);
+
   if (stream) {
-    throw new Error('Workers AI 模式下不支持 callLLM 的原始流式响应，请改用 AI SDK streamText');
+    throw new Error(`callLLM does not support raw stream mode under provider "${runtime.provider}"; use AI SDK streamText instead`);
   }
 
   const controller = new AbortController();
@@ -83,7 +85,7 @@ export async function callLLM({
   try {
     const { text } = await generateText({
       model: getMainLLMModel(env),
-      messages: toWorkersModelMessages(messages),
+      messages: toModelMessages(messages),
       abortSignal: controller.signal,
     });
 
@@ -98,9 +100,9 @@ export async function callLLM({
     );
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('LLM 请求超时，请稍后重试（Workers AI）');
+      throw new Error(`LLM request timed out, please retry later (${runtime.provider})`);
     }
-    throw new Error(`Workers AI 调用失败: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`${runtime.provider} call failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
   }
